@@ -786,7 +786,7 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 
 	// Fetch latest from origin. This also migrates the bare cache's refspec
 	// to the modern remote-tracking layout on first run, so subsequent fetches
-	// never collide with the refs/heads/agent/* branches that worktree creation
+	// never collide with the refs/heads/agent-runs/* branches that worktree creation
 	// locks in this same bare repo.
 	if err := gitFetchContext(ctx, barePath); err != nil {
 		if ctx.Err() != nil {
@@ -829,8 +829,11 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 		return nil, fmt.Errorf("cannot resolve default branch for %s: bare cache at %s has no usable refs (origin/* is empty or ambiguous and bare HEAD has no match). The cache may be corrupted; delete it and retry", params.RepoURL, barePath)
 	}
 
-	// Build branch name: agent/{sanitized-name}/{task-id}
-	branchName := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
+	// Build branch name: agent-runs/{sanitized-name}/{task-id}
+	// The top-level component is `agent-runs` (not `agent`) so the branch begins
+	// with the `agent-` token that GSD's worktree-branch guard requires, while
+	// keeping a trailing-slash namespace the GC reaper can prefix-match.
+	branchName := fmt.Sprintf("agent-runs/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
 
 	// Derive directory name from repo URL.
 	dirName := repoNameFromURL(params.RepoURL)
@@ -1273,7 +1276,7 @@ func deleteStaleAgentBranches(repoPath, keepBranch string) error {
 }
 
 func deleteStaleAgentBranchesContext(ctx context.Context, repoPath, keepBranch string) error {
-	return deleteLocalBranchesUnderContext(ctx, repoPath, "refs/heads/agent/", "refs/heads/"+keepBranch)
+	return deleteLocalBranchesUnderContext(ctx, repoPath, "refs/heads/agent-runs/", "refs/heads/"+keepBranch)
 }
 
 func deleteLocalBranchesUnder(repoPath, namespace, keepRef string) error {

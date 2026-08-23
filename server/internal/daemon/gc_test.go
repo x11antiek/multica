@@ -1221,8 +1221,8 @@ func TestPruneWorktree_RemovesOnlyStaleAgentBranches(t *testing.T) {
 	runGitForGC(t, "", "clone", "--bare", sourceRepo, barePath)
 
 	activeWorktree := filepath.Join(t.TempDir(), "active")
-	activeBranch := "agent/live/12345678"
-	staleBranch := "agent/stale/87654321"
+	activeBranch := "agent-runs/live/12345678"
+	staleBranch := "agent-runs/stale/87654321"
 	keepBranch := "main"
 
 	runGitForGC(t, "", "-C", barePath, "worktree", "add", "-b", activeBranch, activeWorktree, "HEAD")
@@ -1248,7 +1248,7 @@ func TestMaintainRepoCacheRunsLightCleanupWhileTaskActive(t *testing.T) {
 	sourceRepo := createGCGitRepo(t)
 	barePath := filepath.Join(t.TempDir(), "cache.git")
 	runGitForGC(t, "", "clone", "--bare", sourceRepo, barePath)
-	const staleBranch = "agent/stale/87654321"
+	const staleBranch = "agent-runs/stale/87654321"
 	runGitForGC(t, "", "-C", barePath, "branch", staleBranch, "HEAD")
 
 	d.activeTasks.Add(1)
@@ -1264,9 +1264,9 @@ func TestMaintainRepoCacheRunsLightCleanupWhileTaskActive(t *testing.T) {
 }
 
 // TestPruneWorktree_IgnoresLiteralAgentBranch ensures the GC pattern is scoped
-// to the `agent/` namespace. A repo whose only `agent`-shaped ref is the
-// literal `refs/heads/agent` (no slash) must be left untouched — the
-// `for-each-ref` query is narrowed to `refs/heads/agent/` for that reason.
+// to the `agent-runs/` namespace. A repo whose only `agent-runs`-shaped ref is
+// the literal `refs/heads/agent-runs` (no slash) must be left untouched — the
+// `for-each-ref` query is narrowed to `refs/heads/agent-runs/` for that reason.
 func TestPruneWorktree_IgnoresLiteralAgentBranch(t *testing.T) {
 	t.Parallel()
 
@@ -1275,12 +1275,12 @@ func TestPruneWorktree_IgnoresLiteralAgentBranch(t *testing.T) {
 	barePath := filepath.Join(t.TempDir(), "cache.git")
 
 	runGitForGC(t, "", "clone", "--bare", sourceRepo, barePath)
-	runGitForGC(t, "", "-C", barePath, "branch", "agent", "HEAD")
+	runGitForGC(t, "", "-C", barePath, "branch", "agent-runs", "HEAD")
 
 	d.pruneWorktree(barePath)
 
-	if !gitRefExists(t, barePath, "refs/heads/agent") {
-		t.Fatal("expected literal `agent` branch outside the daemon namespace to be preserved")
+	if !gitRefExists(t, barePath, "refs/heads/agent-runs") {
+		t.Fatal("expected literal `agent-runs` branch outside the daemon namespace to be preserved")
 	}
 }
 
@@ -1301,7 +1301,7 @@ func TestPruneWorktree_SkipsMaintenanceWhenNothingDeleted(t *testing.T) {
 	// Park an active agent worktree so the scan has something to filter, and
 	// to make sure pruneWorktree exercises the full code path.
 	activeWorktree := filepath.Join(t.TempDir(), "active")
-	runGitForGC(t, "", "-C", barePath, "worktree", "add", "-b", "agent/live/12345678", activeWorktree, "HEAD")
+	runGitForGC(t, "", "-C", barePath, "worktree", "add", "-b", "agent-runs/live/12345678", activeWorktree, "HEAD")
 
 	sentinelPath := writeOldLooseBlob(t, barePath, "sentinel-content", 60*24*time.Hour)
 
@@ -1314,7 +1314,7 @@ func TestPruneWorktree_SkipsMaintenanceWhenNothingDeleted(t *testing.T) {
 
 	// Introduce a stale agent branch → deletion happens → maintenance runs →
 	// `gc --prune=30.days` reaps the sentinel blob.
-	runGitForGC(t, "", "-C", barePath, "branch", "agent/stale/87654321", "HEAD")
+	runGitForGC(t, "", "-C", barePath, "branch", "agent-runs/stale/87654321", "HEAD")
 	d.pruneWorktree(barePath)
 	if _, err := os.Stat(sentinelPath); !os.IsNotExist(err) {
 		t.Fatalf("expected sentinel blob to be pruned after maintenance ran, stat err=%v", err)
@@ -1385,7 +1385,7 @@ func TestPruneWorktree_LegacyCacheFallbackSerializesWithCreateWorktree(t *testin
 		t.Fatal("expected bare repo to be cached")
 	}
 
-	runGitForGC(t, "", "-C", barePath, "branch", "agent/stale/87654321", "HEAD")
+	runGitForGC(t, "", "-C", barePath, "branch", "agent-runs/stale/87654321", "HEAD")
 
 	blockingCache := &blockingRepoCache{
 		inner:   cache,
@@ -1508,7 +1508,7 @@ func TestPruneWorktreePreemptionCleansLocksBeforeTaskStarts(t *testing.T) {
 	}
 	d.repoCache = cache
 	barePath := cache.Lookup("ws1", sourceRepo)
-	runGitForGC(t, "", "-C", barePath, "branch", "agent/stale/87654321", "HEAD")
+	runGitForGC(t, "", "-C", barePath, "branch", "agent-runs/stale/87654321", "HEAD")
 
 	lockPath := filepath.Join(barePath, "refs", "remotes", "origin", "main.lock")
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
