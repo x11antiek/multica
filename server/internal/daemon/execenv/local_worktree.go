@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/reposetup"
 )
 
 // Local worktree mode gives every task on a local_directory resource its own
@@ -317,6 +319,14 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 			"untracked_skipped", skipped,
 		)
 	}
+
+	// Provision dependencies (e.g. npm ci) declared in .conductor/settings.toml
+	// so the agent lands in a ready worktree. Non-fatal: a broken setup script
+	// must not block the task.
+	if err := reposetup.Run(context.Background(), worktreePath, logger); err != nil && logger != nil {
+		logger.Warn("execenv: local worktree setup script failed (non-fatal)", "path", worktreePath, "error", err)
+	}
+
 	return wt, nil
 }
 
