@@ -1295,6 +1295,132 @@ func TestCodexRawItemMCPToolCallFailureIsSanitized(t *testing.T) {
 	}
 }
 
+func TestCodexRawItemCollaborationToolCalls(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		itemType         string
+		startedItem      string
+		completedItem    string
+		wantTool         string
+		wantInputKey     string
+		wantInputValue   any
+		wantOutputStatus string
+		wantOutputText   string
+	}{
+		{
+			name:             "Codex 0.147 collabAgentToolCall",
+			itemType:         "collabAgentToolCall",
+			startedItem:      `"tool":"spawnAgent","status":"inProgress","senderThreadId":"parent-1","receiverThreadIds":["child-1"],"prompt":"Authorization: Bearer secret-child-token","model":"gpt-5.6-terra","reasoningEffort":"high"`,
+			completedItem:    `"tool":"spawnAgent","status":"completed","senderThreadId":"parent-1","receiverThreadIds":["child-1"],"agentsStates":{"child-1":{"status":"completed","message":"Bearer secret-child-result"}}`,
+			wantTool:         "spawn_agent",
+			wantInputKey:     "receiver_thread_ids",
+			wantInputValue:   []any{"child-1"},
+			wantOutputStatus: "completed",
+			wantOutputText:   `"child-1":"completed"`,
+		},
+		{
+			name:             "newer collabToolCall",
+			itemType:         "collabToolCall",
+			startedItem:      `"tool":"sendInput","status":"inProgress","senderThreadId":"parent-1","receiverThreadId":"child-2","newThreadId":"child-3","prompt":"continue"`,
+			completedItem:    `"tool":"sendInput","status":"failed","senderThreadId":"parent-1","receiverThreadId":"child-2","agentStatus":"errored"`,
+			wantTool:         "send_input",
+			wantInputKey:     "receiver_thread_id",
+			wantInputValue:   "child-2",
+			wantOutputStatus: "failed",
+			wantOutputText:   "agent status: errored",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, _, _ := newTestCodexClient(t)
+			c.notificationProtocol = "raw"
+
+			var messages []Message
+			c.onMessage = func(msg Message) { messages = append(messages, msg) }
+
+			c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"` + tt.itemType + `","id":"collab-1",` + tt.startedItem + `}}}`)
+			c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"` + tt.itemType + `","id":"collab-1",` + tt.completedItem + `}}}`)
+
+			if len(messages) != 2 {
+				t.Fatalf("expected 2 messages, got %d", len(messages))
+			}
+			begin := messages[0]
+			if begin.Type != MessageToolUse || begin.Tool != tt.wantTool || begin.CallID != "collab-1" {
+				t.Fatalf("unexpected collaboration start: %+v", begin)
+			}
+			if !reflect.DeepEqual(begin.Input[tt.wantInputKey], tt.wantInputValue) {
+				t.Fatalf("%s = %#v, want %#v", tt.wantInputKey, begin.Input[tt.wantInputKey], tt.wantInputValue)
+			}
+			if prompt, _ := begin.Input["prompt"].(string); strings.Contains(prompt, "secret-child-token") {
+				t.Fatalf("collaboration prompt leaked a secret: %q", prompt)
+			}
+
+			end := messages[1]
+			if end.Type != MessageToolResult || end.Tool != tt.wantTool || end.CallID != "collab-1" || end.Status != tt.wantOutputStatus {
+				t.Fatalf("unexpected collaboration result: %+v", end)
+			}
+			if !strings.Contains(end.Output, tt.wantOutputText) {
+				t.Fatalf("collaboration result %q does not contain %q", end.Output, tt.wantOutputText)
+			}
+			if strings.Contains(end.Output, "secret-child-result") {
+				t.Fatalf("collaboration result leaked an agent message secret: %q", end.Output)
+			}
+		})
+	}
+}
+
+func TestCodexCollaborationToolNames(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"spawnAgent":  "spawn_agent",
+		"sendInput":   "send_input",
+		"resumeAgent": "resume_agent",
+		"wait":        "wait_agent",
+		"closeAgent":  "close_agent",
+		"spawn_agent": "spawn_agent",
+		"":            "collaboration",
+	}
+	for input, want := range tests {
+		if got := codexCollaborationToolName(map[string]any{"tool": input}); got != want {
+			t.Errorf("codexCollaborationToolName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCodexRawItemSubAgentActivity(t *testing.T) {
+	t.Parallel()
+
+	c, _, _ := newTestCodexClient(t)
+	c.notificationProtocol = "raw"
+
+	var messages []Message
+	c.onMessage = func(msg Message) { messages = append(messages, msg) }
+
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"subAgentActivity","id":"activity-1","kind":"interacted","agentThreadId":"child-1","agentPath":"reviewer"}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"activity-1","kind":"interacted","agentThreadId":"child-1","agentPath":"reviewer"}}}`)
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+	begin := messages[0]
+	if begin.Type != MessageToolUse || begin.Tool != "subagent_activity" || begin.CallID != "activity-1" {
+		t.Fatalf("unexpected subagent activity start: %+v", begin)
+	}
+	if begin.Input["kind"] != "interacted" || begin.Input["agent_thread_id"] != "child-1" || begin.Input["agent_path"] != "reviewer" {
+		t.Fatalf("unexpected subagent activity input: %#v", begin.Input)
+	}
+	end := messages[1]
+	if end.Type != MessageToolResult || end.Tool != "subagent_activity" || end.CallID != "activity-1" || end.Output != "interacted" || end.Status != "completed" {
+		t.Fatalf("unexpected subagent activity result: %+v", end)
+	}
+}
+
 func TestCodexRawItemAgentMessageFinalAnswer(t *testing.T) {
 	t.Parallel()
 

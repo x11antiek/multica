@@ -192,9 +192,10 @@ func classifyPerTaskWindowsSandbox(configFile string, configSyncErr error, share
 }
 
 // prepareCodexHomeWithOpts creates a per-task CODEX_HOME directory and seeds
-// it with config from the shared ~/.codex/ home. Auth is symlinked (shared),
-// config files are copied (isolated). The per-task config.toml gets a
-// daemon-managed sandbox block picked by codexSandboxPolicyFor.
+// it with config and custom agent definitions from the shared ~/.codex/ home.
+// Auth is symlinked (shared), while config and agent files are copied
+// (isolated). The per-task config.toml gets a daemon-managed sandbox block
+// picked by codexSandboxPolicyFor.
 func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *slog.Logger) error {
 	sharedHome := resolveSharedCodexHome()
 	freshHome := false
@@ -312,6 +313,10 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// codex_memory.go for the full rationale and escape hatch.
 	if err := ensureCodexMemoryConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
 		logger.Warn("execenv: codex-home ensure memory config failed", "error", err)
+	}
+
+	if err := hydrateCodexAgents(codexHome, logger); err != nil {
+		return fmt.Errorf("hydrate custom agents: %w", err)
 	}
 
 	return nil

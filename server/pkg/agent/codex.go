@@ -2991,6 +2991,122 @@ func codexMCPToolResultOutput(item map[string]any) string {
 	return strings.Join(segments, "\n")
 }
 
+// codexCollaborationToolName maps Codex app-server's protocol enum onto the
+// stable snake_case tool names shown in Multica transcripts. Accept already
+// normalized names too so this remains compatible with persisted/newer item
+// shapes as the app-server protocol evolves.
+func codexCollaborationToolName(item map[string]any) string {
+	tool, _ := item["tool"].(string)
+	switch tool {
+	case "spawnAgent":
+		return "spawn_agent"
+	case "sendInput":
+		return "send_input"
+	case "resumeAgent":
+		return "resume_agent"
+	case "wait":
+		return "wait_agent"
+	case "closeAgent":
+		return "close_agent"
+	case "":
+		return "collaboration"
+	default:
+		return tool
+	}
+}
+
+// codexCollaborationToolInput exposes the lifecycle metadata operators need to
+// audit spawned work. It supports both the collabAgentToolCall shape emitted by
+// Codex 0.147 and the collabToolCall shape documented by newer app-server
+// builds. Prompts and agent messages pass through the shared recursive
+// redactor before becoming transcript data.
+func codexCollaborationToolInput(item map[string]any) map[string]any {
+	input := make(map[string]any)
+	copyIfPresent := func(targetKey string, sourceKeys ...string) {
+		for _, key := range sourceKeys {
+			if value, ok := item[key]; ok && value != nil {
+				input[targetKey] = value
+				return
+			}
+		}
+	}
+
+	copyIfPresent("sender_thread_id", "senderThreadId", "sender_thread_id")
+	copyIfPresent("receiver_thread_ids", "receiverThreadIds", "receiver_thread_ids")
+	copyIfPresent("receiver_thread_id", "receiverThreadId", "receiver_thread_id")
+	copyIfPresent("new_thread_id", "newThreadId", "new_thread_id")
+	copyIfPresent("prompt", "prompt")
+	copyIfPresent("model", "model")
+	copyIfPresent("reasoning_effort", "reasoningEffort", "reasoning_effort")
+	copyIfPresent("agent_status", "agentStatus", "agent_status")
+	copyIfPresent("agents_states", "agentsStates", "agents_states")
+	return redact.InputMap(input)
+}
+
+// codexCollaborationToolResultOutput summarizes the terminal state without
+// duplicating potentially large child-agent messages into the parent log.
+func codexCollaborationToolResultOutput(item map[string]any) string {
+	status, _ := item["status"].(string)
+	status = codexNormalizePatchStatus(status)
+	if status == "" {
+		status = "completed"
+	}
+
+	segments := []string{status}
+	if agentStatus, _ := item["agentStatus"].(string); agentStatus != "" {
+		segments = append(segments, "agent status: "+agentStatus)
+	} else if agentStatus, _ := item["agent_status"].(string); agentStatus != "" {
+		segments = append(segments, "agent status: "+agentStatus)
+	}
+	var states map[string]any
+	if value, ok := item["agentsStates"].(map[string]any); ok {
+		states = value
+	} else if value, ok := item["agents_states"].(map[string]any); ok {
+		states = value
+	}
+	if len(states) > 0 {
+		statuses := make(map[string]string, len(states))
+		for threadID, rawState := range states {
+			state, _ := rawState.(map[string]any)
+			if agentStatus, _ := state["status"].(string); agentStatus != "" {
+				statuses[threadID] = agentStatus
+			}
+		}
+		if len(statuses) > 0 {
+			if encoded, err := json.Marshal(statuses); err == nil {
+				segments = append(segments, "agents: "+string(encoded))
+			}
+		}
+	}
+	return strings.Join(segments, "\n")
+}
+
+func codexSubAgentActivityInput(item map[string]any) map[string]any {
+	input := make(map[string]any, 3)
+	if kind, _ := item["kind"].(string); kind != "" {
+		input["kind"] = kind
+	}
+	if threadID, _ := item["agentThreadId"].(string); threadID != "" {
+		input["agent_thread_id"] = threadID
+	} else if threadID, _ := item["agent_thread_id"].(string); threadID != "" {
+		input["agent_thread_id"] = threadID
+	}
+	if agentPath, _ := item["agentPath"].(string); agentPath != "" {
+		input["agent_path"] = agentPath
+	} else if agentPath, _ := item["agent_path"].(string); agentPath != "" {
+		input["agent_path"] = agentPath
+	}
+	return redact.InputMap(input)
+}
+
+func codexSubAgentActivityOutput(item map[string]any) string {
+	kind, _ := item["kind"].(string)
+	if kind == "" {
+		return "completed"
+	}
+	return kind
+}
+
 func codexPatchHeadline(status string, fileCount int) string {
 	switch {
 	case status == "" && fileCount == 0:
@@ -3277,6 +3393,49 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 				CallID: itemID,
 				Output: codexMCPToolResultOutput(item),
 				Status: codexNormalizePatchStatus(status),
+			})
+		}
+
+	case method == "item/started" && (itemType == "collabAgentToolCall" || itemType == "collabToolCall"):
+		if c.onMessage != nil {
+			c.onMessage(Message{
+				Type:   MessageToolUse,
+				Tool:   codexCollaborationToolName(item),
+				CallID: itemID,
+				Input:  codexCollaborationToolInput(item),
+			})
+		}
+
+	case method == "item/completed" && (itemType == "collabAgentToolCall" || itemType == "collabToolCall"):
+		status, _ := item["status"].(string)
+		if c.onMessage != nil {
+			c.onMessage(Message{
+				Type:   MessageToolResult,
+				Tool:   codexCollaborationToolName(item),
+				CallID: itemID,
+				Output: codexCollaborationToolResultOutput(item),
+				Status: codexNormalizePatchStatus(status),
+			})
+		}
+
+	case method == "item/started" && itemType == "subAgentActivity":
+		if c.onMessage != nil {
+			c.onMessage(Message{
+				Type:   MessageToolUse,
+				Tool:   "subagent_activity",
+				CallID: itemID,
+				Input:  codexSubAgentActivityInput(item),
+			})
+		}
+
+	case method == "item/completed" && itemType == "subAgentActivity":
+		if c.onMessage != nil {
+			c.onMessage(Message{
+				Type:   MessageToolResult,
+				Tool:   "subagent_activity",
+				CallID: itemID,
+				Output: codexSubAgentActivityOutput(item),
+				Status: "completed",
 			})
 		}
 
