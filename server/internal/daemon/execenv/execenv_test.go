@@ -6181,11 +6181,11 @@ func TestPredictRootDirDistinctForSharedUUIDv7Prefix(t *testing.T) {
 
 // TestLocalWorktreeBranchDistinctForSharedUUIDv7Prefix covers the same
 // truncation in the branch name: two concurrent tasks for one agent would
-// otherwise both ask git for agent/<name>/<same-prefix>.
+// otherwise both ask git for agent-runs/<name>/<same-prefix>.
 func TestLocalWorktreeBranchDistinctForSharedUUIDv7Prefix(t *testing.T) {
 	t.Parallel()
-	a := fmt.Sprintf("agent/%s/%s", sanitizeName("Reviewer"), taskKey("01a01ec0-e69d-7000-8000-000000000001"))
-	b := fmt.Sprintf("agent/%s/%s", sanitizeName("Reviewer"), taskKey("01a01ec0-f014-7000-8000-000000000002"))
+	a := fmt.Sprintf("agent-runs/%s/%s", sanitizeName("Reviewer"), taskKey("01a01ec0-e69d-7000-8000-000000000001"))
+	b := fmt.Sprintf("agent-runs/%s/%s", sanitizeName("Reviewer"), taskKey("01a01ec0-f014-7000-8000-000000000002"))
 	if a == b {
 		t.Fatalf("both tasks resolved to branch %q", a)
 	}
