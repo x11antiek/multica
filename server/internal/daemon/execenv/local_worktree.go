@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/reposetup"
 )
 
 // Local worktree mode gives every task on a local_directory resource its own
@@ -214,7 +216,7 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 			"so the worktree would not match what you have on disk: %w", gitRoot, stashErr)
 	}
 
-	branch := fmt.Sprintf("agent/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
+	branch := fmt.Sprintf("agent-runs/%s/%s", sanitizeName(params.AgentName), taskKey(params.TaskID))
 	actualBranch, err := addLocalWorktree(gitRoot, worktreePath, branch, headSHA)
 	if err != nil {
 		return nil, err
@@ -317,6 +319,14 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 			"untracked_skipped", skipped,
 		)
 	}
+
+	// Provision dependencies (e.g. npm ci) declared in .conductor/settings.toml
+	// so the agent lands in a ready worktree. Non-fatal: a broken setup script
+	// must not block the task.
+	if err := reposetup.Run(context.Background(), worktreePath, logger); err != nil && logger != nil {
+		logger.Warn("execenv: local worktree setup script failed (non-fatal)", "path", worktreePath, "error", err)
+	}
+
 	return wt, nil
 }
 

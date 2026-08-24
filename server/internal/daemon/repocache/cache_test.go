@@ -699,8 +699,8 @@ func TestCreateWorktree(t *testing.T) {
 	}
 
 	// Verify branch name format.
-	if !strings.HasPrefix(result.BranchName, "agent/code-reviewer/") {
-		t.Errorf("expected branch to start with 'agent/code-reviewer/', got %q", result.BranchName)
+	if !strings.HasPrefix(result.BranchName, "agent-runs/code-reviewer/") {
+		t.Errorf("expected branch to start with 'agent-runs/code-reviewer/', got %q", result.BranchName)
 	}
 
 	// Verify the worktree is on the correct branch.
@@ -831,7 +831,7 @@ func TestCreateWorktreeReusesIsolatedGitMetadata(t *testing.T) {
 		t.Fatalf("reused checkout HEAD = %s, want refreshed upstream %s", got, wantHead)
 	}
 
-	// Reuse must not accumulate earlier tasks' agent/* branches, but it must
+	// Reuse must not accumulate earlier tasks' agent-runs/* branches, but it must
 	// preserve user-created branches and commits that may not exist remotely.
 	if err := runGit("-C", second.Path, "show-ref", "--verify", "refs/heads/"+first.BranchName); err == nil {
 		t.Fatalf("stale branch %s survived reuse", first.BranchName)
@@ -1355,7 +1355,7 @@ func runGitAuthored(t *testing.T, repoPath string, args ...string) {
 // TestCreateWorktreeFetchesDespiteAgentBranchOnRemote reproduces the original
 // stale-cache bug. Under the legacy mirror refspec (+refs/heads/*:refs/heads/*)
 // the sequence below would break on the second CreateWorktree because `git
-// fetch` tries to overwrite refs/heads/agent/... which is locked by the first
+// fetch` tries to overwrite refs/heads/agent-runs/... which is locked by the first
 // worktree, and the whole fetch aborts — silently discarding the main-branch
 // update too. Under the modern remote-tracking refspec, fetched heads land in
 // refs/remotes/origin/* and no longer collide with worktree-locked refs.
@@ -1377,7 +1377,7 @@ func TestCreateWorktreeFetchesDespiteAgentBranchOnRemote(t *testing.T) {
 		t.Fatalf("sync failed: %v", err)
 	}
 
-	// First worktree creates refs/heads/agent/... inside the bare cache.
+	// First worktree creates refs/heads/agent-runs/... inside the bare cache.
 	workDir1 := t.TempDir()
 	result1, err := cache.CreateWorktree(WorktreeParams{
 		WorkspaceID: "ws-1",
@@ -1391,7 +1391,7 @@ func TestCreateWorktreeFetchesDespiteAgentBranchOnRemote(t *testing.T) {
 	}
 
 	// Simulate the agent pushing its branch back to origin (i.e. opening a PR).
-	// Now sourceRepo has refs/heads/agent/... matching the locked ref in the
+	// Now sourceRepo has refs/heads/agent-runs/... matching the locked ref in the
 	// bare cache, which is the condition that triggered the legacy bug.
 	if err := os.WriteFile(filepath.Join(result1.Path, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -1408,7 +1408,7 @@ func TestCreateWorktreeFetchesDespiteAgentBranchOnRemote(t *testing.T) {
 	runGitAuthored(t, sourceRepo, "checkout", "--detach", "HEAD")
 
 	// Second worktree: CreateWorktree fetches first. Under the legacy refspec
-	// this fetch would fail (refusing to fetch into locked refs/heads/agent/...)
+	// this fetch would fail (refusing to fetch into locked refs/heads/agent-runs/...)
 	// and the worktree would be based on the stale snapshot. Under the modern
 	// refspec this succeeds and the new worktree sees sourceHead.
 	workDir2 := t.TempDir()
@@ -1533,7 +1533,7 @@ func TestCreateWorktreePathCollisionDoesNotLeakBranch(t *testing.T) {
 		t.Fatal("expected CreateWorktree to fail when path exists as non-worktree")
 	}
 
-	// No agent/* branches should have been created in the bare repo as a
+	// No agent-runs/* branches should have been created in the bare repo as a
 	// side effect of the failed call.
 	out, runErr := exec.Command("git", "-C", barePath, "for-each-ref", "--format=%(refname)", "refs/heads/agent").Output()
 	if runErr != nil {
@@ -2188,8 +2188,8 @@ func TestTaskKeyMatchesExecenvContract(t *testing.T) {
 // git for the same ref.
 func TestBranchNameDistinctForSharedUUIDv7Prefix(t *testing.T) {
 	t.Parallel()
-	a := fmt.Sprintf("agent/%s/%s", sanitizeName("Windows Codex"), taskKey("01a01ec0-e69d-7000-8000-000000000001"))
-	b := fmt.Sprintf("agent/%s/%s", sanitizeName("Windows Codex"), taskKey("01a01ec0-f014-7000-8000-000000000002"))
+	a := fmt.Sprintf("agent-runs/%s/%s", sanitizeName("Windows Codex"), taskKey("01a01ec0-e69d-7000-8000-000000000001"))
+	b := fmt.Sprintf("agent-runs/%s/%s", sanitizeName("Windows Codex"), taskKey("01a01ec0-f014-7000-8000-000000000002"))
 	if a == b {
 		t.Fatalf("both tasks resolved to branch %q", a)
 	}
