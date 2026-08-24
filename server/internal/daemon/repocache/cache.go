@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon/processtree"
+	"github.com/multica-ai/multica/server/internal/reposetup"
 )
 
 // gitEnv returns an environment for git subprocesses that contact remotes.
@@ -878,6 +879,9 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 			"branch", actualBranch,
 			"base", baseRef,
 		)
+		if err := reposetup.Run(ctx, worktreePath, c.logger); err != nil {
+			c.logger.Warn("repo checkout: setup script failed (non-fatal)", "path", worktreePath, "error", err)
+		}
 		return &WorktreeResult{Path: worktreePath, BranchName: actualBranch}, nil
 	}
 
@@ -917,6 +921,10 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 			"branch", actualBranch,
 			"base", baseRef,
 		)
+
+		if err := reposetup.Run(ctx, worktreePath, c.logger); err != nil {
+			c.logger.Warn("repo checkout: setup script failed (non-fatal)", "path", worktreePath, "error", err)
+		}
 
 		return &WorktreeResult{
 			Path:       worktreePath,
@@ -958,6 +966,10 @@ func (c *Cache) CreateWorktreeContext(ctx context.Context, params WorktreeParams
 		"branch", actualBranch,
 		"base", baseRef,
 	)
+
+	if err := reposetup.Run(ctx, worktreePath, c.logger); err != nil {
+		c.logger.Warn("repo checkout: setup script failed (non-fatal)", "path", worktreePath, "error", err)
+	}
 
 	return &WorktreeResult{
 		Path:       worktreePath,
