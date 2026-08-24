@@ -1480,7 +1480,7 @@ func agentWorktreeBranchesContext(ctx context.Context, barePath string) (map[str
 			continue
 		}
 		branch := strings.TrimPrefix(line, "branch refs/heads/")
-		if strings.HasPrefix(branch, "agent/") {
+		if strings.HasPrefix(branch, "agent-runs/") {
 			branches[branch] = struct{}{}
 		}
 	}
@@ -1492,10 +1492,10 @@ func listAgentBranches(barePath string) ([]string, error) {
 }
 
 func listAgentBranchesContext(ctx context.Context, barePath string) ([]string, error) {
-	// Trailing slash narrows the pattern to the `agent/` namespace only. Without
-	// it, `for-each-ref` would also return a branch literally named `agent`,
+	// Trailing slash narrows the pattern to the `agent-runs/` namespace only. Without
+	// it, `for-each-ref` would also return a branch literally named `agent-runs`,
 	// which `agentWorktreeBranches` ignores — that branch would then be deleted.
-	out, err := runGitGCCommandContext(ctx, barePath, "for-each-ref", "--format=%(refname:short)", "refs/heads/agent/")
+	out, err := runGitGCCommandContext(ctx, barePath, "for-each-ref", "--format=%(refname:short)", "refs/heads/agent-runs/")
 	if err != nil {
 		return nil, err
 	}
