@@ -3167,6 +3167,81 @@ func TestCodexExecuteTimesOutWhenTurnStopsAfterToolResult(t *testing.T) {
 	}
 }
 
+// TestCodexExecuteSubagentWaitTimeoutSurvivesSilentWaitAgent covers the
+// orchestrator-blocked-in-wait_agent case: a spawned subagent can hold a single
+// silent tool call (e.g. a full test suite) longer than the base
+// semantic-inactivity window without emitting any parent-visible activity. The
+// extended SubagentWaitTimeout ceiling must keep the session alive rather than
+// abort it (and kill a healthy child). Here the wait stays silent for 300ms —
+// past the 100ms base watchdog but well within the 2s subagent ceiling.
+func TestCodexExecuteSubagentWaitTimeoutSurvivesSilentWaitAgent(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	fakePath := writeFakeCodexAppServer(t, ""+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":1,"result":{}}'`+"\n"+
+		`read line`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thr-wait"}}}'`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":3,"result":{}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-wait","turn":{"id":"turn-wait"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-wait","item":{"type":"agentMessage","id":"msg-1","text":"planning"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr-wait","item":{"type":"collabAgentToolCall","id":"wait-1","tool":"wait"}}}'`+"\n"+
+		`sleep 0.3`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-wait","item":{"type":"collabAgentToolCall","id":"wait-1","tool":"wait"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-wait","turn":{"id":"turn-wait","status":"completed"}}}'`+"\n")
+
+	result := executeFakeCodex(t, fakePath, ExecOptions{
+		Timeout:                   10 * time.Second,
+		SemanticInactivityTimeout: 100 * time.Millisecond,
+		SubagentWaitTimeout:       2 * time.Second,
+	})
+	if result.Status != "completed" {
+		t.Fatalf("silent wait_agent within the subagent ceiling must not abort: status=%q error=%q", result.Status, result.Error)
+	}
+}
+
+// TestCodexExecuteSubagentWaitTimeoutScopedToWaitAgent is the control for the
+// test above: the extended ceiling applies ONLY while blocked in wait_agent. A
+// different collaboration tool (spawn_agent) that goes silent must still trip
+// the base semantic-inactivity watchdog even when SubagentWaitTimeout is large,
+// so a genuinely wedged non-wait turn is not left running indefinitely.
+func TestCodexExecuteSubagentWaitTimeoutScopedToWaitAgent(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	fakePath := writeFakeCodexAppServer(t, ""+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":1,"result":{}}'`+"\n"+
+		`read line`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thr-spawn"}}}'`+"\n"+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":3,"result":{}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-spawn","turn":{"id":"turn-spawn"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-spawn","item":{"type":"agentMessage","id":"msg-1","text":"planning"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thr-spawn","item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent"}}}'`+"\n"+
+		`sleep 5`+"\n")
+
+	result := executeFakeCodex(t, fakePath, ExecOptions{
+		Timeout:                   5 * time.Second,
+		SemanticInactivityTimeout: 100 * time.Millisecond,
+		SubagentWaitTimeout:       2 * time.Second,
+	})
+	if result.Status != "timeout" {
+		t.Fatalf("expected timeout for a silent non-wait tool, got status=%q error=%q", result.Status, result.Error)
+	}
+	if !strings.Contains(result.Error, "semantic inactivity") {
+		t.Fatalf("expected semantic inactivity error, got %q", result.Error)
+	}
+}
+
 func TestCodexExecuteFirstTurnNoProgressSurfacesDiagnostics(t *testing.T) {
 	// Not t.Parallel(): this test mutates codexGracefulShutdownTimeoutNanos.
 	// The model catalog signal below makes both attempts retry safe, so this

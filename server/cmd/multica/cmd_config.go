@@ -40,6 +40,7 @@ var configSetSupportedKeys = []string{
 	"heartbeat_interval",
 	"agent_timeout",
 	"codex_semantic_inactivity_timeout",
+	"codex_subagent_wait_timeout",
 	"codex_handshake_timeout",
 	"disable_auto_update",
 	"auto_update_check_interval",
@@ -53,11 +54,11 @@ var configSetCmd = &cobra.Command{
 		"server_url, app_url, workspace_id, " +
 		"device_name, runtime_name, workspaces_root, max_concurrent_tasks, poll_interval, " +
 		"heartbeat_interval, agent_timeout, " +
-		"codex_semantic_inactivity_timeout, codex_handshake_timeout, " +
+		"codex_semantic_inactivity_timeout, codex_subagent_wait_timeout, codex_handshake_timeout, " +
 		"disable_auto_update, auto_update_check_interval, disable_auto_reload.\n\n" +
 		"The daemon keys (device_name, runtime_name, workspaces_root, max_concurrent_tasks, " +
 		"poll_interval, heartbeat_interval, agent_timeout, " +
-		"codex_semantic_inactivity_timeout, codex_handshake_timeout, " +
+		"codex_semantic_inactivity_timeout, codex_subagent_wait_timeout, codex_handshake_timeout, " +
 		"disable_auto_update, auto_update_check_interval, disable_auto_reload) mirror their " +
 		"--flag / env counterparts and are read by `daemon start` when " +
 		"neither the flag nor the env var is set. " +
@@ -105,6 +106,7 @@ func runConfigShow(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stdout, "%-34s %s\n", "heartbeat_interval:", valueOrDefault(cfg.HeartbeatInterval, "(not set)"))
 	fmt.Fprintf(os.Stdout, "%-34s %s\n", "agent_timeout:", agentTimeoutDisplay(cfg.AgentTimeout))
 	fmt.Fprintf(os.Stdout, "%-34s %s\n", "codex_semantic_inactivity_timeout:", valueOrDefault(cfg.CodexSemanticInactivityTimeout, "(not set)"))
+	fmt.Fprintf(os.Stdout, "%-34s %s\n", "codex_subagent_wait_timeout:", valueOrDefault(cfg.CodexSubagentWaitTimeout, "(not set)"))
 	fmt.Fprintf(os.Stdout, "%-34s %s\n", "codex_handshake_timeout:", valueOrDefault(cfg.CodexHandshakeTimeout, "(not set)"))
 	fmt.Fprintf(os.Stdout, "%-34s %t\n", "disable_auto_update:", cfg.DisableAutoUpdate)
 	fmt.Fprintf(os.Stdout, "%-34s %s\n", "auto_update_check_interval:", valueOrDefault(cfg.AutoUpdateCheckInterval, "(not set)"))
@@ -230,6 +232,10 @@ func applyConfigSet(cfg *cli.CLIConfig, key, value string) error {
 		cfg.AgentTimeout = &s
 	case "codex_semantic_inactivity_timeout":
 		if err := assignPositiveDuration(&cfg.CodexSemanticInactivityTimeout, key, value); err != nil {
+			return err
+		}
+	case "codex_subagent_wait_timeout":
+		if err := assignPositiveDuration(&cfg.CodexSubagentWaitTimeout, key, value); err != nil {
 			return err
 		}
 	case "codex_handshake_timeout":

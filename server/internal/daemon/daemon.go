@@ -7532,6 +7532,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ThreadName:                 deriveTaskThreadName(task),
 		Timeout:                    d.cfg.AgentTimeout,
 		SemanticInactivityTimeout:  d.cfg.CodexSemanticInactivityTimeout,
+		SubagentWaitTimeout:        d.cfg.CodexSubagentWaitTimeout,
 		FirstTurnNoProgressTimeout: d.cfg.CodexFirstTurnNoProgressTimeout,
 		IdleWatchdogTimeout:        idleWatchdogTimeout,
 		HandshakeTimeout:           d.cfg.CodexHandshakeTimeout,

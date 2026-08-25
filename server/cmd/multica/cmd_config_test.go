@@ -74,6 +74,7 @@ func TestRunConfigShowIncludesProfileAndDefaults(t *testing.T) {
 		"heartbeat_interval:",
 		"agent_timeout:",
 		"codex_semantic_inactivity_timeout:",
+		"codex_subagent_wait_timeout:",
 		"codex_handshake_timeout:",
 		"disable_auto_update:",
 		"auto_update_check_interval:",
@@ -209,6 +210,7 @@ func TestApplyConfigSetSupportsDaemonKeys(t *testing.T) {
 		{"poll_interval", "10s"},
 		{"heartbeat_interval", "5s"},
 		{"codex_semantic_inactivity_timeout", "15m"},
+		{"codex_subagent_wait_timeout", "45m"},
 		{"codex_handshake_timeout", "45s"},
 		{"disable_auto_update", "true"},
 		{"auto_update_check_interval", "12h"},
@@ -226,6 +228,7 @@ func TestApplyConfigSetSupportsDaemonKeys(t *testing.T) {
 		cfg.PollInterval != "10s" ||
 		cfg.HeartbeatInterval != "5s" ||
 		cfg.CodexSemanticInactivityTimeout != "15m" ||
+		cfg.CodexSubagentWaitTimeout != "45m" ||
 		cfg.CodexHandshakeTimeout != "45s" ||
 		cfg.DisableAutoUpdate != true ||
 		cfg.AutoUpdateCheckInterval != "12h" ||
@@ -264,6 +267,7 @@ func TestApplyConfigSetPositiveDurationRoundTripsToDaemonResolver(t *testing.T) 
 	}{
 		{"heartbeat_interval", func(cfg cli.CLIConfig) string { return cfg.HeartbeatInterval }},
 		{"codex_semantic_inactivity_timeout", func(cfg cli.CLIConfig) string { return cfg.CodexSemanticInactivityTimeout }},
+		{"codex_subagent_wait_timeout", func(cfg cli.CLIConfig) string { return cfg.CodexSubagentWaitTimeout }},
 		{"codex_handshake_timeout", func(cfg cli.CLIConfig) string { return cfg.CodexHandshakeTimeout }},
 		{"auto_update_check_interval", func(cfg cli.CLIConfig) string { return cfg.AutoUpdateCheckInterval }},
 	}

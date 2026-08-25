@@ -49,6 +49,16 @@ type ExecOptions struct {
 	// a running turn gone quiet?"), so the two move independently. Currently
 	// honoured by the codex backend (GH #3262).
 	FirstTurnNoProgressTimeout time.Duration
+	// SubagentWaitTimeout optionally extends the semantic-inactivity ceiling
+	// while an orchestrator is blocked in a pending wait_agent call awaiting
+	// spawned subagents. A subagent can run a single long tool call (e.g. a full
+	// test suite) for longer than the parent's semantic-inactivity window without
+	// emitting any parent-visible activity, which would otherwise abort the whole
+	// session and kill a healthy child. The child runs its own semantic watchdog,
+	// so a larger ceiling here is safe. Zero uses the provider default; a value
+	// at or below SemanticInactivityTimeout disables the extension. Currently
+	// honoured by the codex backend.
+	SubagentWaitTimeout time.Duration
 	// IdleWatchdogTimeout optionally narrows the daemon's generic no-message
 	// watchdog for this execution. Zero keeps the daemon-wide window, and a
 	// value above that window cannot extend the global safety bound. The
