@@ -58,8 +58,19 @@ const (
 	// healthy turns the watchdog killed. 60s clears that evidence with margin
 	// while keeping the fast-fail value (MUL-5542).
 	defaultCodexFirstTurnNoProgressTimeout = 60 * time.Second
-	defaultCodexHandshakeTimeout           = 30 * time.Second
-	codexVersionDiagnosticTimeout          = 2 * time.Second
+	// defaultCodexSubagentWaitTimeout is the semantic-inactivity ceiling applied
+	// only while the orchestrator is blocked in a pending wait_agent call. A
+	// spawned subagent (e.g. a gsd-executor running a full test suite) can hold a
+	// single silent tool call far longer than defaultCodexSemanticInactivityTimeout
+	// without emitting any parent-visible activity, so the tight 10 minute
+	// watchdog would abort the whole session and kill a healthy child. The child
+	// runs its own semantic watchdog, so a longer parent ceiling is safe. This
+	// stays bounded (not infinite) because DefaultAgentTimeout is 0 — there is no
+	// wall-clock execution cap by default, so a genuinely wedged wait_agent must
+	// still fail eventually.
+	defaultCodexSubagentWaitTimeout = 60 * time.Minute
+	defaultCodexHandshakeTimeout    = 30 * time.Second
+	codexVersionDiagnosticTimeout   = 2 * time.Second
 	// codexGracefulShutdownTimeout bounds how long the lifecycle goroutine
 	// waits for codex to exit on its own after stdin is closed, before forcing
 	// a context-cancel kill. A clean exit lets codex run its shutdown path and
@@ -947,6 +958,17 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	if semanticInactivityTimeout == 0 {
 		semanticInactivityTimeout = defaultCodexSemanticInactivityTimeout
 	}
+	// subagentWaitTimeout is the extended ceiling applied only while the
+	// orchestrator is blocked in a pending wait_agent call (see the timer loop
+	// below). It never shrinks below the base watchdog: a value at or under it
+	// simply disables the extension.
+	subagentWaitTimeout := opts.SubagentWaitTimeout
+	if subagentWaitTimeout == 0 {
+		subagentWaitTimeout = defaultCodexSubagentWaitTimeout
+	}
+	if subagentWaitTimeout < semanticInactivityTimeout {
+		subagentWaitTimeout = semanticInactivityTimeout
+	}
 	handshakeTimeout := opts.HandshakeTimeout
 	if handshakeTimeout <= 0 {
 		handshakeTimeout = defaultCodexHandshakeTimeout
@@ -1517,6 +1539,21 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 
 		lastSemanticActivity := time.Now()
 		lastSemanticActivityDescription := "turn/start"
+		// awaitingSubagents is true while the orchestrator is blocked in a pending
+		// wait_agent call. While set, the semantic-inactivity timer is armed to the
+		// larger subagentWaitTimeout instead of semanticInactivityTimeout, so a
+		// silent-but-healthy child (one long tool call) is not mistaken for a wedged
+		// parent. It is set on the tool-use:wait_agent activity that marks entry to
+		// the wait and cleared on the matching tool-result:wait_agent. The entry
+		// event is guaranteed to flow through semanticActivityCh — it is the "last
+		// activity" the timeout diagnostic reports today.
+		awaitingSubagents := false
+		effectiveSemanticTimeout := func() time.Duration {
+			if awaitingSubagents {
+				return subagentWaitTimeout
+			}
+			return semanticInactivityTimeout
+		}
 		semanticTimer := time.NewTimer(semanticInactivityTimeout)
 		defer semanticTimer.Stop()
 
@@ -1553,7 +1590,13 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 			case activity := <-semanticActivityCh:
 				lastSemanticActivity = time.Now()
 				lastSemanticActivityDescription = activity
-				resetTimer(semanticTimer, semanticInactivityTimeout)
+				switch activity {
+				case "tool-use:wait_agent":
+					awaitingSubagents = true
+				case "tool-result:wait_agent":
+					awaitingSubagents = false
+				}
+				resetTimer(semanticTimer, effectiveSemanticTimeout())
 				if activity == "status:running" && !firstTurnStarted {
 					firstTurnStarted = true
 					firstItemWait.start(time.Now())
@@ -1591,9 +1634,12 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				waitingForTurn = false
 				finishFirstItemWait("semantic_inactivity_timeout")
 				finalStatus = "timeout"
+				// The armed ceiling is the extended subagentWaitTimeout while the
+				// orchestrator is blocked in wait_agent, otherwise the base watchdog.
+				firedTimeout := effectiveSemanticTimeout()
 				timeoutDiagnostic = codexTimeoutDiagnostic{
 					Kind:         codexTimeoutSemanticInactivity,
-					Timeout:      semanticInactivityTimeout,
+					Timeout:      firedTimeout,
 					LastActivity: lastSemanticActivityDescription,
 					ThreadID:     threadID,
 					TurnID:       c.turnID,
@@ -1603,7 +1649,8 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					"pid", cmd.Process.Pid,
 					"thread_id", threadID,
 					"turn_id", c.turnID,
-					"timeout", semanticInactivityTimeout.String(),
+					"timeout", firedTimeout.String(),
+					"awaiting_subagents", awaitingSubagents,
 					"last_activity", lastSemanticActivityDescription,
 					"idle_for", time.Since(lastSemanticActivity).Round(time.Millisecond).String(),
 				)

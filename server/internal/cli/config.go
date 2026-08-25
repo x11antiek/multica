@@ -105,6 +105,15 @@ type CLIConfig struct {
 	// DefaultCodexSemanticInactivityTimeout.
 	CodexSemanticInactivityTimeout string `json:"codex_semantic_inactivity_timeout,omitempty"`
 
+	// CodexSubagentWaitTimeout is the extended semantic-inactivity ceiling used
+	// only while a Codex orchestrator is blocked in a pending wait_agent call (Go
+	// duration string). Persist-once semantics match PollInterval: empty = not
+	// set, positive = use this value. Resolution precedence:
+	// --codex-subagent-wait-timeout flag, MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT env,
+	// this field, DefaultCodexSubagentWaitTimeout. A value at or below the
+	// semantic-inactivity timeout disables the extension.
+	CodexSubagentWaitTimeout string `json:"codex_subagent_wait_timeout,omitempty"`
+
 	// CodexHandshakeTimeout caps the Codex app-server startup RPCs (Go
 	// duration string). Persist-once semantics match PollInterval.
 	// Resolution precedence: --codex-handshake-timeout flag,

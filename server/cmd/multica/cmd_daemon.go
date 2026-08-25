@@ -102,6 +102,7 @@ func init() {
 	f.Duration("heartbeat-interval", 0, "Heartbeat interval (env: MULTICA_DAEMON_HEARTBEAT_INTERVAL)")
 	f.Duration("agent-timeout", 0, "Absolute per-task wall-clock cap; 0 = no cap, rely on the watchdogs (env: MULTICA_AGENT_TIMEOUT)")
 	f.Duration("codex-semantic-inactivity-timeout", 0, "Codex semantic inactivity timeout (env: MULTICA_CODEX_SEMANTIC_INACTIVITY_TIMEOUT)")
+	f.Duration("codex-subagent-wait-timeout", 0, "Extended Codex semantic-inactivity ceiling while blocked in wait_agent awaiting subagents (env: MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT)")
 	f.Duration("codex-handshake-timeout", 0, "Codex app-server startup RPC timeout (env: MULTICA_CODEX_HANDSHAKE_TIMEOUT)")
 	f.Int("max-concurrent-tasks", 0, "Max tasks running in parallel (env: MULTICA_DAEMON_MAX_CONCURRENT_TASKS)")
 	f.Bool("no-auto-update", false, "Disable periodic CLI self-update (env: MULTICA_DAEMON_AUTO_UPDATE=false)")
@@ -124,6 +125,7 @@ func init() {
 	rf.Duration("heartbeat-interval", 0, "Heartbeat interval (env: MULTICA_DAEMON_HEARTBEAT_INTERVAL)")
 	rf.Duration("agent-timeout", 0, "Absolute per-task wall-clock cap; 0 = no cap, rely on the watchdogs (env: MULTICA_AGENT_TIMEOUT)")
 	rf.Duration("codex-semantic-inactivity-timeout", 0, "Codex semantic inactivity timeout (env: MULTICA_CODEX_SEMANTIC_INACTIVITY_TIMEOUT)")
+	rf.Duration("codex-subagent-wait-timeout", 0, "Extended Codex semantic-inactivity ceiling while blocked in wait_agent awaiting subagents (env: MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT)")
 	rf.Duration("codex-handshake-timeout", 0, "Codex app-server startup RPC timeout (env: MULTICA_CODEX_HANDSHAKE_TIMEOUT)")
 	rf.Int("max-concurrent-tasks", 0, "Max tasks running in parallel (env: MULTICA_DAEMON_MAX_CONCURRENT_TASKS)")
 	rf.Bool("no-auto-update", false, "Disable periodic CLI self-update (env: MULTICA_DAEMON_AUTO_UPDATE=false)")
@@ -1015,6 +1017,14 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	}
 	if semanticOverride > 0 {
 		overrides.CodexSemanticInactivityTimeout = semanticOverride
+	}
+	subagentWaitFlag, _ := cmd.Flags().GetDuration("codex-subagent-wait-timeout")
+	subagentWaitOverride, err := resolveDaemonDurationOverride(subagentWaitFlag, "MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT", fileCfg.CodexSubagentWaitTimeout)
+	if err != nil {
+		return err
+	}
+	if subagentWaitOverride > 0 {
+		overrides.CodexSubagentWaitTimeout = subagentWaitOverride
 	}
 	handshakeFlag, _ := cmd.Flags().GetDuration("codex-handshake-timeout")
 	handshakeOverride, err := resolveDaemonDurationOverride(handshakeFlag, "MULTICA_CODEX_HANDSHAKE_TIMEOUT", fileCfg.CodexHandshakeTimeout)

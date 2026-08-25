@@ -29,7 +29,16 @@ const (
 	// hard ceiling for cost/resource control can set MULTICA_AGENT_TIMEOUT.
 	DefaultAgentTimeout                   = 0
 	DefaultCodexSemanticInactivityTimeout = 10 * time.Minute
-	DefaultCodexHandshakeTimeout          = 30 * time.Second
+	// DefaultCodexSubagentWaitTimeout is the extended semantic-inactivity ceiling
+	// applied only while a Codex orchestrator is blocked in a pending wait_agent
+	// call awaiting spawned subagents. A subagent can hold one long silent tool
+	// call (e.g. a full test suite) past DefaultCodexSemanticInactivityTimeout
+	// without emitting parent-visible activity; the tight 10 min watchdog would
+	// otherwise abort the whole session and kill a healthy child. Bounded (not
+	// infinite) because DefaultAgentTimeout is 0. Set to <= the semantic timeout
+	// to disable the extension. Override via MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT.
+	DefaultCodexSubagentWaitTimeout = 60 * time.Minute
+	DefaultCodexHandshakeTimeout    = 30 * time.Second
 	// DefaultOpenCodeIdleWatchdog shortens the no-message budget for OpenCode
 	// runs while they are not executing a tool. OpenCode streams text and tool
 	// events incrementally, so a completely silent interval here covers both a
@@ -131,6 +140,12 @@ type Config struct {
 	HeartbeatInterval              time.Duration
 	AgentTimeout                   time.Duration
 	CodexSemanticInactivityTimeout time.Duration
+	// CodexSubagentWaitTimeout is the extended semantic-inactivity ceiling used
+	// only while a Codex orchestrator is blocked in a pending wait_agent call
+	// (MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT). 0 means unset and falls back to the
+	// backend default; a value at or below CodexSemanticInactivityTimeout disables
+	// the extension.
+	CodexSubagentWaitTimeout time.Duration
 	// CodexFirstTurnNoProgressTimeout is an explicit override for the Codex
 	// first-turn no-progress ceiling (MULTICA_CODEX_FIRST_TURN_TIMEOUT). 0 means
 	// unset: the backend keeps its default ceiling, which CodexSemanticInactivityTimeout
@@ -167,6 +182,7 @@ type Overrides struct {
 	// distinguishable from "flag not passed". nil = use env/default.
 	AgentTimeout                   *time.Duration
 	CodexSemanticInactivityTimeout time.Duration
+	CodexSubagentWaitTimeout       time.Duration
 	CodexHandshakeTimeout          time.Duration
 	MaxConcurrentTasks             int
 	DaemonID                       string
@@ -314,6 +330,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 	if overrides.CodexSemanticInactivityTimeout > 0 {
 		codexSemanticInactivityTimeout = overrides.CodexSemanticInactivityTimeout
+	}
+
+	codexSubagentWaitTimeout, err := durationFromEnv("MULTICA_CODEX_SUBAGENT_WAIT_TIMEOUT", DefaultCodexSubagentWaitTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if overrides.CodexSubagentWaitTimeout > 0 {
+		codexSubagentWaitTimeout = overrides.CodexSubagentWaitTimeout
 	}
 
 	// 0 = unset: the codex backend keeps its default first-turn ceiling. A
@@ -564,6 +588,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		HeartbeatInterval:               heartbeatInterval,
 		AgentTimeout:                    agentTimeout,
 		CodexSemanticInactivityTimeout:  codexSemanticInactivityTimeout,
+		CodexSubagentWaitTimeout:        codexSubagentWaitTimeout,
 		CodexFirstTurnNoProgressTimeout: codexFirstTurnNoProgressTimeout,
 		CodexHandshakeTimeout:           codexHandshakeTimeout,
 		OpenCodeIdleWatchdog:            openCodeIdleWatchdog,
