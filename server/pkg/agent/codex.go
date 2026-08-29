@@ -977,6 +977,10 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	}
 	codexArgs := buildCodexArgs(opts, b.cfg.Logger)
 	cmd := exec.CommandContext(runCtx, execPath, codexArgs...)
+	if err := configureCodexMacOSAppDataGuard(cmd, b.cfg.Env); err != nil {
+		cancel()
+		return nil, fmt.Errorf("configure codex macOS app-data guard: %w", err)
+	}
 	hideAgentWindow(cmd)
 	// Run codex in its own process group so a cancel-on-stuck cleanup
 	// reaches the whole tree — the codex Node wrapper plus the native
