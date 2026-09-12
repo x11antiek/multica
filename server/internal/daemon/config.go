@@ -85,6 +85,7 @@ const (
 	DefaultGCCompletedTaskTTLSelfHost     = 0                   // disabled — self-host keeps every completed env until its issue goes terminal, unless an operator opts in
 	DefaultGCOrphanTTL                    = 72 * time.Hour      // 3 days — orphans with no meta (crashes, pre-GC leftovers)
 	DefaultGCArtifactTTL                  = 12 * time.Hour      // 12h — drop regenerable artifacts once a task has been completed this long
+	DefaultGCMinFreePercent               = 0                   // disabled — no disk-pressure escalation unless an operator opts in (see GCMinFreePercent)
 	DefaultGCCodexSessionTTL              = time.Duration(0)    // disabled — exact provider transcripts are retained unless an operator explicitly opts into pruning
 	DefaultGCHermesMemoryTTL              = 90 * 24 * time.Hour // 90 days — reclaim per-agent Hermes memory stores untouched this long (long: reclaiming these is visible amnesia, and they are a few markdown files)
 	DefaultGCHermesSessionTTL             = time.Duration(0)    // disabled — exact provider transcripts are retained unless an operator explicitly opts into pruning
@@ -131,6 +132,7 @@ type Config struct {
 	GCOrphanTTL                    time.Duration         // clean orphan dirs with no meta, or dirs whose issue gc-check returns 404, once they exceed this age (default: 72h). The 404 path uses the same TTL — a scoped-down token can't instantly wipe live workspaces.
 	GCArtifactTTL                  time.Duration         // once a task has been completed for at least this long, drop regenerable artifacts: pattern-matched build outputs when the parent record keeps the directory (an open issue), and the exact daemon-managed Codex cache for every task kind (default: 12h, set 0 to disable both)
 	GCArtifactPatterns             []string              // basename patterns whose subtrees are removed during artifact cleanup (default: node_modules, .next, .turbo)
+	GCMinFreePercent               int                   // when the filesystem holding WorkspacesRoot drops below this percent free, the GC escalates: it drops regenerable artifacts (GCArtifactPatterns) from completed task dirs oldest-first, ignoring GCArtifactTTL, until free space recovers. This is the GC's only reaction to disk pressure — every other knob is time/TTL-paced and cannot notice a filling disk. Off by default (0); values are clamped to 0..99 (100 would never be satisfiable). Never touches running, orphan, or local_directory dirs.
 	GCRepoTTL                      time.Duration         // evict a cached bare repo under .repos once no task has created a worktree from it for this long, it has no worktrees left, and it is no longer attached to any watched workspace (default: 30d, set 0 to disable)
 	GCRepoMaintenanceEnabled       bool                  // run reflog expiry and git gc after stale agent refs are removed (default: true; disable independently as an operational kill switch)
 	GCCodexSessionTTL              time.Duration         // reclaim a Codex session store (~/.codex/multica-sessions/<profile>/<agent>/<conversation>) untouched for at least this long (default: 0/disabled; set a duration to opt in)
@@ -613,6 +615,19 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 	gcRepoMaintenanceEnabled := boolFromEnv("MULTICA_GC_REPO_MAINTENANCE_ENABLED", true)
 	gcArtifactPatterns := patternsFromEnv("MULTICA_GC_ARTIFACT_PATTERNS", DefaultGCArtifactPatterns)
+	gcMinFreePercent, err := intFromEnv("MULTICA_GC_MIN_FREE_PERCENT", DefaultGCMinFreePercent)
+	if err != nil {
+		return Config{}, err
+	}
+	if gcMinFreePercent < 0 {
+		gcMinFreePercent = 0
+	}
+	if gcMinFreePercent > 99 {
+		// A filesystem is never 100% free (the workspace dirs themselves occupy
+		// space), so a value that high would make the daemon escalate on every
+		// cycle forever. Clamp to a satisfiable ceiling instead.
+		gcMinFreePercent = 99
+	}
 
 	// Auto-update config: default -> env override -> CLI override.
 	//
@@ -663,6 +678,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		GCOrphanTTL:                     gcOrphanTTL,
 		GCArtifactTTL:                   gcArtifactTTL,
 		GCArtifactPatterns:              gcArtifactPatterns,
+		GCMinFreePercent:                gcMinFreePercent,
 		GCRepoTTL:                       gcRepoTTL,
 		GCRepoMaintenanceEnabled:        gcRepoMaintenanceEnabled,
 		GCCodexSessionTTL:               gcCodexSessionTTL,

@@ -398,6 +398,12 @@ type Daemon struct {
 	terminalReportMu     sync.Mutex
 	terminalReportFlight map[string]struct{}
 
+	// diskFree reports (availBytes, totalBytes) for the filesystem holding a
+	// path. Defaults to diskFreeStats (a real statfs); tests override it to
+	// simulate disk pressure without filling a real disk. Read only by the GC
+	// disk-pressure escalation.
+	diskFree func(path string) (availBytes, totalBytes uint64, err error)
+
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
 	runtimeIndex map[string]Runtime // runtimeID -> Runtime for provider lookups
@@ -712,6 +718,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		terminalReportWakeup:      make(chan struct{}, 1),
 		terminalReportNow:         time.Now,
 		terminalReportFlight:      make(map[string]struct{}),
+		diskFree:                  diskFreeStats,
 		workspaces:                make(map[string]*workspaceState),
 		runtimeIndex:              make(map[string]Runtime),
 		profileLaunchSpecs:        make(map[string]profileLaunchSpec),
