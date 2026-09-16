@@ -65,9 +65,8 @@ const hermesSessionDBEntry = "state.db"
 
 // HermesSessionStorePath returns the persistent session store for
 // (daemonProfile, agentID, sourceHome, conversation), or "" when the session
-// database must stay task-local — no agent to key on, no conversation to key
-// on (neither an issue nor a chat session), or an unresolvable Multica profile
-// dir. The daemon marks the returned path in-use for the task's duration so
+// database must stay task-local — no agent or durable task scope to key on, or
+// an unresolvable Multica profile dir. The daemon marks the returned path in-use for the task's duration so
 // PruneHermesSessionStores never reclaims it mid-mount.
 func HermesSessionStorePath(daemonProfile, agentID, sourceHome string, task TaskContextForEnv) string {
 	agent := sanitizePathSegment(agentID)
@@ -86,21 +85,11 @@ func HermesSessionStorePath(daemonProfile, agentID, sourceHome string, task Task
 		hermesMemoryProfileSegment(sourceHome), conversation)
 }
 
-// hermesConversationSegment maps a task to the conversation its transcript
-// belongs to: the issue it runs on, or the chat session when there is no
-// issue. Same derivation as the per-issue Codex session store
-// (codexSessionStoreKey), so both providers agree on what "one conversation"
-// means. Returns "" for a task that belongs to neither, which keeps its
-// session database task-local rather than inventing a shard nothing will
-// resume.
+// hermesConversationSegment maps a task to the durable scope its transcript
+// belongs to. Same derivation as the Codex session store, so every provider
+// agrees on issue, chat, autopilot and one-shot task boundaries.
 func hermesConversationSegment(task TaskContextForEnv) string {
-	if issue := sanitizePathSegment(task.IssueID); issue != "" {
-		return issue
-	}
-	if chat := sanitizePathSegment(task.ChatSessionID); chat != "" {
-		return "chat_" + chat
-	}
-	return ""
+	return sessionConversationSegment(task)
 }
 
 // hermesSessionMount is what a mount attempt actually achieved.

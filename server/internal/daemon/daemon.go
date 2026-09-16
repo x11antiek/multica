@@ -7746,6 +7746,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
+		TaskID:              task.ID,
 		IssueID:             task.IssueID,
 		TriggerCommentID:    task.TriggerCommentID,
 		TriggerThreadID:     task.TriggerThreadID,
@@ -8033,7 +8034,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if provider == "reasonix" {
 		reasonixEnv = sanitizeAgentEnv(agentEnvOverrides)
 	}
-	// Guard this task's per-issue Codex session store from the GC for the whole
+	// Guard this task's scoped Codex session store from the GC for the whole
 	// task, starting before Prepare/Reuse mounts it — so a prune that samples the
 	// store's stale (pre-remount) mtime cannot reclaim it out from under a resume
 	// of a long-idle issue (MUL-4424). No-op for non-Codex tasks / no stable key.
@@ -10072,7 +10073,7 @@ func (d *Daemon) reserveEnvRootForGC(envRoot string) (release func(), ok bool) {
 }
 
 // markActiveStore records that a task is about to use the given persistent
-// store — a per-issue Codex session store or a per-agent Hermes memory store —
+// store — a scoped Codex session store or a per-agent Hermes memory store —
 // so the GC never reclaims it mid-task. These stores live outside the env root,
 // so isActiveEnvRoot does not cover them (MUL-4424). If a GC
 // delete has already reserved this store, we wait for that removal to finish

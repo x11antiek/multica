@@ -53,7 +53,7 @@ type PrepareParams struct {
 	// the parent, whose lifetime is the task run.
 	EnvRootPreclaimed bool
 	// Profile is the daemon's profile name (empty = default). It namespaces the
-	// per-issue Codex session store so a second profile-daemon sharing the same
+	// scoped Codex session store so a second profile-daemon sharing the same
 	// ~/.codex cannot see or GC this daemon's stores (MUL-4424).
 	Profile      string
 	Provider     string // agent provider (determines runtime config and skill injection paths)
@@ -128,6 +128,7 @@ type PrepareParams struct {
 
 // TaskContextForEnv is the subset of task context used for writing context files.
 type TaskContextForEnv struct {
+	TaskID           string // unique task queue ID; durable fallback key for one-shot provider transcripts
 	IssueID          string
 	TriggerCommentID string // comment that triggered this task (empty for on_assign)
 	TriggerThreadID  string // root comment ID for the triggering thread; falls back to TriggerCommentID when empty
@@ -309,8 +310,8 @@ type Environment struct {
 	// directory holding the wrapper file. Empty when no $include is
 	// emitted (fresh install).
 	OpenclawIncludeRoot string
-	// CursorDataDir is the per-task Cursor data directory (set only for
-	// cursor provider when the agent has managed mcp_config). The daemon
+	// CursorDataDir is the persistent per-conversation Cursor data directory
+	// (set only for cursor provider when the agent has managed mcp_config). The daemon
 	// exports this as CURSOR_DATA_DIR so project-level MCP approvals are
 	// isolated from the user's persistent ~/.cursor/projects state.
 	CursorDataDir string
@@ -418,6 +419,12 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	}
 	if params.TaskID == "" {
 		return nil, fmt.Errorf("execenv: task ID is required")
+	}
+	// The execution task ID is also the durable transcript key for one-shot
+	// tasks. Keep it in the provider context so direct Prepare callers receive
+	// the same retention guarantee as the daemon claim path.
+	if params.Task.TaskID == "" {
+		params.Task.TaskID = params.TaskID
 	}
 
 	envRoot, err := ResolveRootDir(RootDirParams{
@@ -633,7 +640,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// agent definitions and skills.
 	if params.Provider == "codex" {
 		codexHome := filepath.Join(envRoot, codexHomeDirName)
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, IsLocalDirectory: params.LocalWorkDir != "" || params.LocalWorktree != nil, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
+		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
 			return nil, fmt.Errorf("execenv: prepare codex-home: %w", err)
 		}
 		if err := hydrateCodexSkills(codexHome, params.Task.AgentSkills, params.Task.DisabledRuntimeSkills, logger); err != nil {
@@ -692,12 +699,19 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	}
 
 	// For Cursor, materialize managed MCP into project-local config and use
-	// an isolated CURSOR_DATA_DIR for the per-workdir approval sidecar. Cursor
+	// an isolated, profile-owned CURSOR_DATA_DIR for the per-workdir approval
+	// sidecar and Cursor's native transcript files. Cursor
 	// still reads ~/.cursor/mcp.json, but only servers with approval entries in
-	// this per-task data dir can load, so user-global MCP servers do not leak
+	// this conversation-scoped data dir can load, so user-global MCP servers do not leak
 	// into managed-MCP runs.
 	if params.Provider == "cursor" {
-		cursorDataDir, err := prepareCursorMcpConfig(envRoot, workDir, params.McpConfig, params.CursorMcpAuthSource, manifest)
+		cursorDataStore := ProviderSessionStorePath(params.Profile, "cursor", params.Task)
+		if cursorDataStore == "" {
+			// Defensive fallback for direct library callers without a task ID. The
+			// production daemon always supplies one.
+			cursorDataStore = envRoot
+		}
+		cursorDataDir, err := prepareCursorMcpConfig(cursorDataStore, workDir, params.McpConfig, params.CursorMcpAuthSource, manifest)
 		if err != nil {
 			return nil, fmt.Errorf("execenv: prepare cursor mcp config: %w", err)
 		}
@@ -776,7 +790,7 @@ type ReuseParams struct {
 	// agent picks up any runtime_config changes saved since the prior run.
 	OpenclawGateway OpenclawGatewayPin
 	// Profile is the daemon's profile name (empty = default), mirroring
-	// PrepareParams.Profile so a reused task keys its per-issue Codex session
+	// PrepareParams.Profile so a reused task keys its Codex session
 	// store into the same profile namespace (MUL-4424).
 	Profile string
 	// LocalDirectory is true when the reused WorkDir is a user-supplied
@@ -915,7 +929,7 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	// config (especially sandbox/network access) is up to date.
 	if params.Provider == "codex" {
 		codexHome := filepath.Join(env.RootDir, codexHomeDirName)
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, ResumeSessionID: params.ResumeSessionID, IsLocalDirectory: params.LocalDirectory, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
+		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, ResumeSessionID: params.ResumeSessionID, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
 			// Leaving env.CodexHome empty does not launch Codex against an
 			// ambient home: configureCodexTaskShellEnvironment rejects the empty
 			// value ("task CODEX_HOME is missing") and the run fails before
@@ -1001,7 +1015,11 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	// mcp_config must replace the prior run's .cursor/mcp.json and isolated
 	// approvals before the next cursor-agent process starts.
 	if params.Provider == "cursor" && env.RootDir != "" {
-		cursorDataDir, err := prepareCursorMcpConfig(env.RootDir, params.WorkDir, params.McpConfig, params.CursorMcpAuthSource, manifest)
+		cursorDataStore := ProviderSessionStorePath(params.Profile, "cursor", params.Task)
+		if cursorDataStore == "" {
+			cursorDataStore = env.RootDir
+		}
+		cursorDataDir, err := prepareCursorMcpConfig(cursorDataStore, params.WorkDir, params.McpConfig, params.CursorMcpAuthSource, manifest)
 		if err != nil {
 			logger.Warn("execenv: refresh cursor mcp config failed", "error", err)
 			return nil

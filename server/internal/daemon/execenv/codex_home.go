@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,32 +57,18 @@ type CodexHomeOptions struct {
 	// both macOS and Linux paths deterministically.
 	GOOS string
 	// ResumeSessionID is the Codex thread/session ID this run intends to
-	// resume, when any. It is consulted when populating the per-issue session
-	// store (local_directory tasks) or migrating a legacy per-task home whose
+	// resume, when any. It is consulted when populating the per-conversation
+	// store or migrating a legacy per-task home whose
 	// sessions/ still symlinks the shared ~/.codex/sessions: the single rollout
 	// for this ID is exposed so thread/resume can find it without pulling the
 	// whole shared history back in. Empty means a fresh thread (no rollout to
 	// expose). See prepareCodexSessionsDir (MUL-4424).
 	ResumeSessionID string
-	// IsLocalDirectory marks a task whose env root is never reused across task
-	// IDs — every local_directory task, in_place or worktree. Worktree tasks
-	// get a fresh env root per task just like in-place ones do
-	// (shouldReusePriorWorkdir refuses any local assignment), so they need the
-	// same per-issue session store; keying this on "runs in the user's
-	// directory" instead would silently drop a Codex agent's conversation
-	// history between turns on the same issue.
-	//
-	// These tasks get a fresh codex-home per task ID (the
-	// daemon never reuses their workdir), so their sessions/ is pointed at the
-	// per-issue store (SessionStoreKey) that survives across task IDs and holds
-	// ONLY this issue's rollouts — never the machine's whole ~/.codex/sessions.
-	// See prepareCodexSessionsDir (MUL-4424).
-	IsLocalDirectory bool
-	// SessionStoreKey is a stable, per-(agent, issue-or-chat) relative path that
+	// SessionStoreKey is a stable, per-(agent, conversation-or-task) relative path that
 	// identifies this task's persistent Codex sessions store. It survives across
 	// task IDs (unlike the task-scoped envRoot the GC reclaims) so a follow-up
-	// run resumes the same thread. Empty when no stable key is available (e.g. a
-	// task with no issue), in which case sessions/ stays task-local. See
+	// run resumes the same thread and one-shot transcripts remain auditable.
+	// Empty when no stable key is available, in which case sessions/ stays task-local. See
 	// codexSessionStoreDir and prepareCodexSessionsDir (MUL-4424).
 	SessionStoreKey string
 	// CodexCustomArgs are the effective Codex CLI args this task will launch
@@ -211,6 +198,12 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// shared ~/.codex/sessions in — a huge shared history would otherwise stall
 	// Codex's `initialize` state backfill (MUL-4424). See prepareCodexSessionsDir.
 	if err := prepareCodexSessionsDir(codexHome, sharedHome, opts, logger); err != nil {
+		// A stable store key is the retention boundary: continuing with a
+		// task-local sessions directory would make the run appear healthy while
+		// leaving its exact rollout eligible for task GC. Fail closed instead.
+		if opts.SessionStoreKey != "" {
+			return fmt.Errorf("prepare persistent Codex sessions: %w", err)
+		}
 		logger.Warn("execenv: codex-home sessions dir prepare failed", "error", err)
 	}
 
@@ -365,7 +358,7 @@ var codexSessionStateGlobs = []string{
 // user's own thread list.
 const codexSessionStoreRoot = "multica-sessions"
 
-// codexSessionStoreDir returns the persistent, per-(agent, issue) Codex sessions
+// codexSessionStoreDir returns the persistent, per-(agent, scope) Codex sessions
 // store for key, rooted on the shared Codex home's volume. It survives across
 // task IDs (unlike the task-scoped envRoot the GC reclaims) and holds only that
 // issue's rollouts. Empty key → "" (caller keeps sessions/ task-local).
@@ -402,17 +395,13 @@ func codexSessionStoreNamespace(profile string) string {
 }
 
 // codexSessionStoreKey builds a profile-and-task key for persistent Codex
-// sessions. Issue IDs retain their existing path;
-// direct chats use a prefixed chat_session_id so the two namespaces cannot
-// collide. Returns "" when neither stable identifier is available.
+// sessions. Issue and chat IDs retain their existing paths; one-shot tasks use
+// their autopilot run or task ID so their exact rollouts are retained after the
+// disposable task environment is collected.
 func codexSessionStoreKey(profile string, task TaskContextForEnv) string {
-	storeID := sanitizePathSegment(task.IssueID)
+	storeID := sessionConversationSegment(task)
 	if storeID == "" {
-		chatID := sanitizePathSegment(task.ChatSessionID)
-		if chatID == "" {
-			return ""
-		}
-		storeID = "chat_" + chatID
+		return ""
 	}
 	agent := sanitizePathSegment(task.AgentID)
 	if agent == "" {
@@ -435,7 +424,7 @@ func sanitizePathSegment(s string) string {
 	return b.String()
 }
 
-// PruneCodexSessionStores reclaims per-issue Codex session stores under the
+// PruneCodexSessionStores reclaims scoped Codex session stores under the
 // shared home's multica-sessions root that have not been touched within
 // retention, bounding the lifetime of the conversation history each one holds.
 //
@@ -559,83 +548,197 @@ func dirStat(dir string) (newest time.Time, size int64) {
 // task produced no output before it was cancelled. So we scope sessions/ to a
 // single task/issue:
 //
-//   - local_directory task: envRoot (and thus codex-home) is fresh per task ID
-//     and never reused, so sessions/ links to the per-issue store on the shared
-//     Codex volume — stable across task IDs, GC-safe, and holding only this
-//     issue's rollouts. See linkCodexSessionsToStore.
-//   - Fresh managed task: sessions/ is absent — create an empty local dir so
-//     backfill is trivial; the reused envRoot carries it to the next run.
-//   - Reused managed task whose sessions/ is already a real dir: it is
-//     authoritative — the prior run's rollout already lives here — leave it.
+//   - Every task with a stable issue, chat, autopilot-run or task key links to a
+//     provider-native store outside WorkspacesRoot. Task GC can then remove the
+//     checkout and build artifacts without deleting exact rollouts or subagent
+//     events. Managed homes from an older daemon are migrated before linking.
+//   - A task with no stable key keeps a task-local empty sessions directory.
 //   - Reused managed task still holding a legacy symlink into the shared
-//     sessions (older build): migrate. With a resume, route it through the
-//     per-issue store (cross-volume-safe); without one, replace the symlink
-//     with an empty local dir. Either way drop the stale session-state DB so
-//     Codex rebuilds it from the scoped sessions.
+//     sessions (older build): expose only the requested resume rollout into the
+//     scoped store. Never expose the machine's complete shared history.
 func prepareCodexSessionsDir(codexHome, sharedHome string, opts CodexHomeOptions, logger *slog.Logger) error {
 	dst := filepath.Join(codexHome, "sessions")
 	sharedSessions := filepath.Join(sharedHome, "sessions")
 	storeDir := codexSessionStoreDir(sharedHome, opts.SessionStoreKey)
 
-	// local_directory tasks have no reusable envRoot, so their history can only
-	// persist across task IDs in the per-issue store. The daemon still verifies
-	// the specific rollout is present before claiming a resume (see
-	// CodexResumeRolloutPresent), so a missing one no longer masquerades as one.
-	if opts.IsLocalDirectory {
-		if storeDir == "" {
-			// No stable per-issue key (e.g. a non-issue task). Fall back to an
-			// empty local dir rather than re-exposing the whole shared history.
-			return os.MkdirAll(dst, 0o755)
+	if storeDir == "" {
+		fi, err := os.Lstat(dst)
+		switch {
+		case os.IsNotExist(err):
+			return os.MkdirAll(dst, 0o700)
+		case err != nil:
+			return fmt.Errorf("stat sessions dir %s: %w", dst, err)
+		case fi.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0:
+			return os.MkdirAll(dst, 0o700)
+		default:
+			if err := os.Remove(dst); err != nil {
+				return fmt.Errorf("remove legacy sessions link %s: %w", dst, err)
+			}
+			resetCodexSessionState(codexHome, logger)
+			return os.MkdirAll(dst, 0o700)
 		}
-		return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
 	}
 
 	fi, err := os.Lstat(dst)
 	switch {
 	case os.IsNotExist(err):
-		return os.MkdirAll(dst, 0o755) // fresh managed task — empty local dir
+		return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
 	case err != nil:
 		return fmt.Errorf("stat sessions dir %s: %w", dst, err)
 	}
 
-	if fi.Mode()&os.ModeSymlink == 0 {
-		// Already a real directory (task-local, authoritative). Ensure it
-		// exists (no-op) and leave its contents alone.
-		return os.MkdirAll(dst, 0o755)
-	}
-
-	// A symlink/junction. If it already points at this issue's store (a home
-	// migrated with a resume on a prior reuse), it is authoritative — re-ensure
-	// the store link and the resume rollout, then leave it.
-	if storeDir != "" {
-		if target, rlErr := os.Readlink(dst); rlErr == nil && sameCodexPath(target, storeDir) {
-			return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
+	if fi.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+		// Upgrade path: managed Codex homes used to keep their authoritative
+		// rollout tree here. Merge it into the durable store before replacing it
+		// with a link; the source is removed only after every byte was copied.
+		if err := migrateCodexTaskSessions(dst, storeDir); err != nil {
+			return err
 		}
+		if err := os.RemoveAll(dst); err != nil {
+			return fmt.Errorf("remove migrated task-local sessions %s: %w", dst, err)
+		}
+		resetCodexSessionState(codexHome, logger)
+		return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
 	}
 
-	// Legacy symlink into the shared ~/.codex/sessions — migrate it. Drop the
-	// session-derived state so Codex re-indexes the scoped sessions instead of
-	// the stale rows it built from the whole shared home.
+	// A symlink/junction already targeting this conversation is authoritative.
+	if target, rlErr := os.Readlink(dst); rlErr == nil && sameCodexPath(target, storeDir) {
+		return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
+	}
+
+	// Legacy link into ~/.codex/sessions (or another stale target): remove only
+	// the link, then mount the scoped store. linkCodexSessionsToStore imports the
+	// requested resume rollout without pulling unrelated global history in.
 	if err := os.Remove(dst); err != nil {
 		return fmt.Errorf("remove legacy sessions symlink %s: %w", dst, err)
 	}
 	resetCodexSessionState(codexHome, logger)
-
-	// With a resume, route through the per-issue store so the rollout is exposed
-	// cross-volume-safely (hard link within the shared volume + a directory link
-	// into the task home). Without a resume — or with no stable key — an empty
-	// local dir is all a fresh thread needs.
-	if opts.ResumeSessionID != "" && storeDir != "" {
-		logger.Info("execenv: migrated codex-home sessions from shared symlink to per-issue store",
-			"codex_home", codexHome, "resume_session", true)
-		return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
-	}
-	logger.Info("execenv: migrated codex-home sessions from shared symlink to task-local dir",
-		"codex_home", codexHome, "resume_session", false)
-	return os.MkdirAll(dst, 0o755)
+	logger.Info("execenv: migrated codex-home sessions link to persistent store",
+		"codex_home", codexHome, "resume_session", opts.ResumeSessionID != "")
+	return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
 }
 
-// linkCodexSessionsToStore points codex-home/sessions (dst) at the per-issue
+// migrateCodexTaskSessions copies an older managed home's task-local rollout
+// tree into the persistent store. It only removes the source after this helper
+// succeeds, so an unreadable or unsupported entry fails closed. Existing store
+// files are accepted only when they are byte-identical; conflicting bytes are
+// never overwritten or silently discarded.
+func migrateCodexTaskSessions(src, storeDir string) error {
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		return fmt.Errorf("create Codex session store %s: %w", storeDir, err)
+	}
+	if err := os.Chmod(storeDir, 0o700); err != nil {
+		return fmt.Errorf("restrict Codex session store %s: %w", storeDir, err)
+	}
+	return filepath.WalkDir(src, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		dst := filepath.Join(storeDir, rel)
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(dst, 0o700)
+		case entry.Type().IsRegular():
+			if same, err := codexSessionFilesEqual(path, dst); err != nil {
+				return err
+			} else if same {
+				return nil
+			}
+			if _, err := os.Lstat(dst); err == nil {
+				return fmt.Errorf("refusing to overwrite conflicting Codex session file %s", dst)
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("stat Codex session destination %s: %w", dst, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+				return err
+			}
+			tmp, err := os.CreateTemp(filepath.Dir(dst), ".session-migrating-")
+			if err != nil {
+				return fmt.Errorf("create Codex session staging file: %w", err)
+			}
+			tmpPath := tmp.Name()
+			defer os.Remove(tmpPath)
+			in, err := os.Open(path)
+			if err != nil {
+				tmp.Close()
+				return fmt.Errorf("open Codex session file %s: %w", path, err)
+			}
+			_, copyErr := io.Copy(tmp, in)
+			closeInErr := in.Close()
+			closeOutErr := tmp.Close()
+			if copyErr != nil {
+				return fmt.Errorf("copy Codex session file %s: %w", path, copyErr)
+			}
+			if closeInErr != nil {
+				return fmt.Errorf("close Codex session source %s: %w", path, closeInErr)
+			}
+			if closeOutErr != nil {
+				return fmt.Errorf("close Codex session staging file %s: %w", tmpPath, closeOutErr)
+			}
+			if err := os.Chmod(tmpPath, 0o600); err != nil {
+				return fmt.Errorf("restrict Codex session staging file %s: %w", tmpPath, err)
+			}
+			if err := os.Rename(tmpPath, dst); err != nil {
+				return fmt.Errorf("publish Codex session file %s: %w", dst, err)
+			}
+			return nil
+		default:
+			return fmt.Errorf("refusing to migrate Codex session entry %s: unsupported type %s", path, entry.Type())
+		}
+	})
+}
+
+func codexSessionFilesEqual(a, b string) (bool, error) {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false, fmt.Errorf("stat Codex session source %s: %w", a, err)
+	}
+	bInfo, err := os.Stat(b)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat Codex session destination %s: %w", b, err)
+	}
+	if os.SameFile(aInfo, bInfo) {
+		return true, nil
+	}
+	if aInfo.Size() != bInfo.Size() {
+		return false, nil
+	}
+	digest := func(path string) ([sha256.Size]byte, error) {
+		var out [sha256.Size]byte
+		f, err := os.Open(path)
+		if err != nil {
+			return out, err
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return out, err
+		}
+		copy(out[:], h.Sum(nil))
+		return out, nil
+	}
+	aDigest, err := digest(a)
+	if err != nil {
+		return false, fmt.Errorf("hash Codex session source %s: %w", a, err)
+	}
+	bDigest, err := digest(b)
+	if err != nil {
+		return false, fmt.Errorf("hash Codex session destination %s: %w", b, err)
+	}
+	return aDigest == bDigest, nil
+}
+
+// linkCodexSessionsToStore points codex-home/sessions (dst) at the scoped
 // store (storeDir) via an idempotent directory link — a symlink on Unix, a
 // junction on Windows — both of which cross filesystem volumes without special
 // privilege. The store lives on the shared Codex home's volume, so linking the
@@ -649,8 +752,11 @@ func prepareCodexSessionsDir(codexHome, sharedHome string, opts CodexHomeOptions
 // store. Both paths are on the shared volume, so the link is zero-copy and never
 // puts a (possibly gigabyte) rollout on initialize's critical path.
 func linkCodexSessionsToStore(dst, storeDir, sharedSessions, resumeID string, logger *slog.Logger) error {
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return fmt.Errorf("create codex session store %s: %w", storeDir, err)
+	}
+	if err := os.Chmod(storeDir, 0o700); err != nil {
+		return fmt.Errorf("restrict codex session store %s: %w", storeDir, err)
 	}
 	if resumeID != "" && len(findCodexRollouts(storeDir, resumeID)) == 0 {
 		if err := exposeResumeRollout(sharedSessions, storeDir, resumeID, logger); err != nil {
@@ -682,7 +788,7 @@ func touchCodexSessionStore(storeDir string, logger *slog.Logger) {
 	}
 }
 
-// CodexSessionStorePath returns the per-conversation Codex session store on the
+// CodexSessionStorePath returns the scoped Codex session store on the
 // shared home, or "" when there is no stable issue or chat key. The daemon
 // marks this path in-use for the duration of a task so
 // PruneCodexSessionStores never reclaims a store mid-mount, closing the
@@ -728,7 +834,7 @@ func resetCodexSessionState(codexHome string, logger *slog.Logger) {
 // so the store can live on the shared Codex volume while the task home lives
 // under WorkspacesRoot (see linkCodexSessionsToStore).
 func ensureCodexSessionsLink(dst, src string) error {
-	if err := os.MkdirAll(src, 0o755); err != nil {
+	if err := os.MkdirAll(src, 0o700); err != nil {
 		return fmt.Errorf("create codex session store %s: %w", src, err)
 	}
 	if fi, err := os.Lstat(dst); err == nil {

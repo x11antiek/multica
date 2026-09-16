@@ -46,14 +46,16 @@ type cursorRemoteMcpApprovalServer struct {
 }
 
 // prepareCursorMcpConfig writes the Cursor-native MCP sidecars for agents that
-// have an explicit managed mcp_config saved. A nil/null mcp_config means "let
-// Cursor behave normally", so no .cursor/mcp.json or CURSOR_DATA_DIR is created.
-func prepareCursorMcpConfig(envRoot, workDir string, mcpConfig json.RawMessage, mcpAuthSource string, manifest *sidecarManifest) (string, error) {
+// have an explicit managed mcp_config saved. cursorDataDir is profile-owned in
+// production so Cursor's native transcripts survive task-directory cleanup. A
+// nil/null mcp_config means "let Cursor behave normally", so no .cursor/mcp.json
+// or CURSOR_DATA_DIR is created and Cursor keeps using its global durable store.
+func prepareCursorMcpConfig(cursorDataRoot, workDir string, mcpConfig json.RawMessage, mcpAuthSource string, manifest *sidecarManifest) (string, error) {
 	if !hasManagedCursorMcpConfig(mcpConfig) {
 		return "", nil
 	}
-	if envRoot == "" {
-		return "", fmt.Errorf("env root is required for managed cursor mcp_config")
+	if cursorDataRoot == "" {
+		return "", fmt.Errorf("data directory is required for managed cursor mcp_config")
 	}
 
 	projectRoot := cursorProjectRoot(workDir)
@@ -77,10 +79,13 @@ func prepareCursorMcpConfig(envRoot, workDir string, mcpConfig json.RawMessage, 
 		return "", fmt.Errorf("write .cursor/mcp.json: %w", err)
 	}
 
-	cursorDataDir := filepath.Join(envRoot, "cursor-data")
+	cursorDataDir := filepath.Join(cursorDataRoot, "cursor-data")
 	projectDataDir := filepath.Join(cursorDataDir, "projects", cursorSlugifyPath(projectRoot))
 	if err := os.MkdirAll(projectDataDir, 0o700); err != nil {
 		return "", fmt.Errorf("create cursor project data dir: %w", err)
+	}
+	if err := os.Chmod(cursorDataDir, 0o700); err != nil {
+		return "", fmt.Errorf("restrict cursor data dir: %w", err)
 	}
 	if err := removeCursorMcpAuthFile(projectDataDir); err != nil {
 		return "", err

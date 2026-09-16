@@ -59,6 +59,12 @@ func TestHermesSessionStorePathScoping(t *testing.T) {
 	if got := HermesSessionStorePath("", agent, "", TaskContextForEnv{}); got != "" {
 		t.Fatalf("store path without a conversation = %q, want empty", got)
 	}
+	if got := HermesSessionStorePath("", agent, "", TaskContextForEnv{TaskID: "task-1"}); filepath.Base(got) != "task_task-1" {
+		t.Fatalf("one-shot task store = %q, want task_task-1 suffix", got)
+	}
+	if got := HermesSessionStorePath("", agent, "", TaskContextForEnv{AutopilotRunID: "run-1", TaskID: "task-1"}); filepath.Base(got) != "autopilot_run-1" {
+		t.Fatalf("autopilot store = %q, want autopilot_run-1 suffix", got)
+	}
 }
 
 // TestPrepareHermesHomeSessionStorePersistsAcrossTasks is the regression test

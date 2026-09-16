@@ -134,7 +134,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// and are never reclaimed by the task walk above.
 	d.pruneRepoWorktreesContext(ctx, root, stats)
 
-	// Reclaim per-issue Codex session stores idle past their TTL. These live
+	// Reclaim scoped Codex session stores idle past their opt-in TTL. These live
 	// under the shared ~/.codex home (outside WorkspacesRoot) so resume survives
 	// the task GC, which means they need their own bounded lifecycle (MUL-4424).
 	if storesRemoved, storeBytes := execenv.PruneCodexSessionStores(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
