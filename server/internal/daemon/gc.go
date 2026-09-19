@@ -36,6 +36,7 @@ func (d *Daemon) gcLoop(ctx context.Context) {
 		"completed_task_ttl", d.cfg.GCCompletedTaskTTL,
 		"orphan_ttl", d.cfg.GCOrphanTTL,
 		"artifact_ttl", d.cfg.GCArtifactTTL,
+		"min_free_percent", d.cfg.GCMinFreePercent,
 		"repo_ttl", d.cfg.GCRepoTTL,
 		"repo_maintenance_enabled", d.cfg.GCRepoMaintenanceEnabled,
 		"artifact_patterns", d.cfg.GCArtifactPatterns,
@@ -173,6 +174,14 @@ func (d *Daemon) runGC(ctx context.Context) {
 			stats.bytesReclaimed += tempBytes
 		}
 	}
+
+	// Time/TTL-paced reclamation above cannot notice a disk that is filling
+	// faster than artifacts age out of their TTL. This last pass is the only one
+	// that reacts to free space directly: if the filesystem is under the
+	// configured pressure threshold, it drops regenerable artifacts from
+	// completed task dirs, oldest-first, until space recovers. Runs after the
+	// normal passes so it only ever escalates what they already reclaimed.
+	d.runArtifactPressureSweep(ctx, stats)
 
 	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootIndexEntriesReclaimed > 0 {
 		d.logger.Info("gc: cycle complete",
@@ -387,6 +396,162 @@ func recordArtifactCleanup(stats *gcStats, removed int, bytes int64, perPattern 
 	for pattern, count := range perPattern {
 		stats.byPattern[pattern] += count
 	}
+}
+
+// pressureCandidate is one completed task dir eligible for disk-pressure
+// artifact reclamation, tagged with its completion time so the sweep takes the
+// oldest work first.
+type pressureCandidate struct {
+	taskDir     string
+	completedAt time.Time
+}
+
+// runArtifactPressureSweep drops regenerable artifacts from completed task dirs
+// when the filesystem holding WorkspacesRoot is below GCMinFreePercent free. It
+// is the GC's only free-space-driven pass; every other pass is paced purely by
+// time and TTL, so a burst of large checkouts can fill the disk between cycles
+// with completed work whose artifacts have not yet aged past GCArtifactTTL.
+//
+// It reclaims strictly less than the normal passes: artifacts only
+// (GCArtifactPatterns), never a whole task dir. cleanTaskArtifacts preserves
+// .git, logs/, and output/, so a completed run stays inspectable — it just
+// loses its regenerable node_modules/.next/.turbo, which the next reuse
+// reinstalls. Running, orphan (no completed_at), and local_directory dirs are
+// never touched: the first is live work, the second has no completion signal to
+// trust, and the third is the user's own audit trail.
+func (d *Daemon) runArtifactPressureSweep(ctx context.Context, stats *gcStats) {
+	if d.cfg.GCMinFreePercent <= 0 {
+		return
+	}
+	freePct, ok := d.freeDiskPercent(d.cfg.WorkspacesRoot)
+	if !ok || freePct >= d.cfg.GCMinFreePercent {
+		return
+	}
+
+	candidates := d.gatherPressureCandidates(ctx)
+	if len(candidates) == 0 {
+		return
+	}
+	// Oldest completion first: reclaim the work least likely to be resumed
+	// before touching anything recent.
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].completedAt.Before(candidates[j].completedAt)
+	})
+
+	d.logger.Info("gc: disk pressure, escalating artifact cleanup",
+		"free_percent", freePct,
+		"min_free_percent", d.cfg.GCMinFreePercent,
+		"candidates", len(candidates),
+	)
+
+	swept := 0
+	for _, c := range candidates {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, err := d.gcTaskDirOwner(c.taskDir); err != nil {
+			d.logger.Warn("gc: refusing pressure sweep of unowned task directory", "dir", c.taskDir, "error", err)
+			stats.skipped++
+			continue
+		}
+		// Same reservation the normal mutation path takes: either GC wins the
+		// race and a new task waits for the artifact removal, or a task already
+		// holds the dir and we skip it.
+		release, ok := d.reserveEnvRootForGC(c.taskDir)
+		if !ok {
+			continue
+		}
+		// Re-read provenance after taking the exclusion lock so a concurrent
+		// reset cannot change ownership between validation and mutation.
+		if _, err := d.gcTaskDirOwner(c.taskDir); err != nil {
+			release()
+			d.logger.Warn("gc: refusing pressure sweep after task ownership changed", "dir", c.taskDir, "error", err)
+			stats.skipped++
+			continue
+		}
+		removed, bytes, perPattern := d.cleanTaskArtifacts(c.taskDir, d.cfg.GCArtifactPatterns)
+		release()
+		if removed == 0 {
+			continue
+		}
+		recordArtifactCleanup(stats, removed, bytes, perPattern)
+		swept++
+		// Re-measure after each reclaim so the sweep stops the moment the disk
+		// is healthy again rather than stripping every completed dir.
+		if freePct, ok := d.freeDiskPercent(d.cfg.WorkspacesRoot); ok && freePct >= d.cfg.GCMinFreePercent {
+			d.logger.Info("gc: disk pressure relieved", "free_percent", freePct, "dirs_swept", swept)
+			return
+		}
+	}
+	if swept > 0 {
+		if freePct, ok := d.freeDiskPercent(d.cfg.WorkspacesRoot); ok {
+			d.logger.Info("gc: disk pressure sweep exhausted candidates", "free_percent", freePct, "dirs_swept", swept)
+		}
+	}
+}
+
+// gatherPressureCandidates lists completed, non-active, non-local task dirs
+// across every workspace. Deliberately independent of the issue-status
+// reconciliation the normal cycle performs: disk pressure is a local emergency
+// and artifact reclaim needs no parent-record confirmation (the data is
+// regenerable), so this makes no network call.
+func (d *Daemon) gatherPressureCandidates(ctx context.Context) []pressureCandidate {
+	root := d.cfg.WorkspacesRoot
+	wsEntries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var candidates []pressureCandidate
+	for _, wsEntry := range wsEntries {
+		if ctx.Err() != nil {
+			return candidates
+		}
+		if !wsEntry.IsDir() || strings.HasPrefix(wsEntry.Name(), ".") {
+			continue
+		}
+		wsDir := filepath.Join(root, wsEntry.Name())
+		taskEntries, err := os.ReadDir(wsDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range taskEntries {
+			if !entry.IsDir() {
+				continue
+			}
+			taskDir := filepath.Join(wsDir, entry.Name())
+			meta, err := execenv.ReadGCMeta(taskDir)
+			if err != nil || meta == nil {
+				continue // orphan: no completion signal to trust under pressure
+			}
+			if meta.CompletedAt.IsZero() || meta.LocalDirectory {
+				continue
+			}
+			if d.isActiveEnvRoot(taskDir) {
+				continue
+			}
+			candidates = append(candidates, pressureCandidate{taskDir: taskDir, completedAt: meta.CompletedAt})
+		}
+	}
+	return candidates
+}
+
+// freeDiskPercent returns the whole-number percent (0..100) of the filesystem
+// holding path that is free, and whether the probe succeeded. A failed probe
+// returns ok=false so the caller treats "can't tell" as "no pressure" rather
+// than escalating blindly.
+func (d *Daemon) freeDiskPercent(path string) (int, bool) {
+	probe := d.diskFree
+	if probe == nil {
+		probe = diskFreeStats
+	}
+	avail, total, err := probe(path)
+	if err != nil || total == 0 {
+		if err != nil {
+			d.logger.Warn("gc: disk free probe failed", "path", path, "error", err)
+		}
+		return 0, false
+	}
+	return int(avail * 100 / total), true
 }
 
 type gcAction int
