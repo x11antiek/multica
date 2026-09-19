@@ -106,6 +106,15 @@ func TestPatternsFromEnv_DefaultsWhenUnset(t *testing.T) {
 	}
 }
 
+func TestProviderTranscriptPruningDefaultsDisabled(t *testing.T) {
+	if DefaultGCCodexSessionTTL != 0 {
+		t.Fatalf("DefaultGCCodexSessionTTL = %s, want disabled", DefaultGCCodexSessionTTL)
+	}
+	if DefaultGCHermesSessionTTL != 0 {
+		t.Fatalf("DefaultGCHermesSessionTTL = %s, want disabled", DefaultGCHermesSessionTTL)
+	}
+}
+
 // A localhost server URL is not the official cloud host, so this exercises the
 // self-host branch of defaultGCCompletedTaskTTL: retention stays unbounded until
 // an operator opts in, and a daemon upgrade never starts deleting on its own.

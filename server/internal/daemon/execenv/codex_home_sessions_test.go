@@ -103,6 +103,70 @@ func TestPrepareCodexSessionsDir_RealDirIsAuthoritative(t *testing.T) {
 	}
 }
 
+func TestPrepareCodexSessionsDir_ManagedTaskUsesPersistentStore(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sharedHome := filepath.Join(root, "shared")
+	codexHome := filepath.Join(root, "task", "codex-home")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex-home: %v", err)
+	}
+	key := filepath.Join("default", "agent-1", "issue-1")
+	if err := prepareCodexSessionsDir(codexHome, sharedHome, CodexHomeOptions{SessionStoreKey: key}, testLogger()); err != nil {
+		t.Fatalf("prepareCodexSessionsDir: %v", err)
+	}
+
+	store := codexSessionStoreDir(sharedHome, key)
+	assertSessionsLinkedToStore(t, filepath.Join(codexHome, "sessions"), store)
+	rollout := filepath.Join(codexHome, "sessions", "2026", "09", "17", "rollout-session.jsonl")
+	seedRolloutAt(t, rollout, 64)
+	if err := os.RemoveAll(filepath.Join(root, "task")); err != nil {
+		t.Fatalf("remove task env: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store, "2026", "09", "17", "rollout-session.jsonl")); err != nil {
+		t.Fatalf("persistent rollout was removed with task env: %v", err)
+	}
+}
+
+func TestPrepareCodexSessionsDir_MigratesManagedTaskLocalRollouts(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sharedHome := filepath.Join(root, "shared")
+	codexHome := filepath.Join(root, "codex-home")
+	rollout := filepath.Join(codexHome, "sessions", "2026", "09", "17", "rollout-session.jsonl")
+	seedRolloutAt(t, rollout, 73)
+	key := filepath.Join("default", "agent-1", "issue-1")
+
+	if err := prepareCodexSessionsDir(codexHome, sharedHome, CodexHomeOptions{SessionStoreKey: key}, testLogger()); err != nil {
+		t.Fatalf("prepareCodexSessionsDir: %v", err)
+	}
+	store := codexSessionStoreDir(sharedHome, key)
+	assertSessionsLinkedToStore(t, filepath.Join(codexHome, "sessions"), store)
+	stored := filepath.Join(store, "2026", "09", "17", "rollout-session.jsonl")
+	if info, err := os.Stat(stored); err != nil || info.Size() != 73 {
+		t.Fatalf("migrated rollout stat = (%v, %v), want 73 bytes", info, err)
+	}
+}
+
+func TestMigrateCodexTaskSessionsConflictFailsClosed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	src := filepath.Join(root, "task-sessions")
+	store := filepath.Join(root, "store")
+	writeFile(t, filepath.Join(src, "rollout.jsonl"), "task bytes")
+	writeFile(t, filepath.Join(store, "rollout.jsonl"), "store bytes")
+
+	if err := migrateCodexTaskSessions(src, store); err == nil {
+		t.Fatal("conflicting session bytes must fail instead of overwriting history")
+	}
+	if got, _ := os.ReadFile(filepath.Join(src, "rollout.jsonl")); string(got) != "task bytes" {
+		t.Fatalf("source changed after failed migration: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(store, "rollout.jsonl")); string(got) != "store bytes" {
+		t.Fatalf("store changed after failed migration: %q", got)
+	}
+}
+
 func TestPrepareCodexSessionsDir_MigratesLegacySymlinkNoResume(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -341,7 +405,7 @@ func TestPrepareCodexSessionsDir_LocalDirectoryUsesPerIssueStore(t *testing.T) {
 	seedFakeRollout(t, filepath.Join(sharedHome, "sessions"), "2026", "07", "12", "other-b", 16)
 
 	key := filepath.Join("agent-1", "issue-1")
-	if err := prepareCodexSessionsDir(codexHome, sharedHome, CodexHomeOptions{IsLocalDirectory: true, SessionStoreKey: key}, testLogger()); err != nil {
+	if err := prepareCodexSessionsDir(codexHome, sharedHome, CodexHomeOptions{SessionStoreKey: key}, testLogger()); err != nil {
 		t.Fatalf("prepareCodexSessionsDir: %v", err)
 	}
 
@@ -372,7 +436,7 @@ func TestPrepareCodexSessionsDir_LocalDirectoryNoKeyFallsBackToEmptyDir(t *testi
 	sharedHome := filepath.Join(root, "shared")
 	seedFakeRollout(t, filepath.Join(sharedHome, "sessions"), "2026", "07", "13", "other", 16)
 
-	if err := prepareCodexSessionsDir(codexHome, sharedHome, CodexHomeOptions{IsLocalDirectory: true}, testLogger()); err != nil {
+	if err := prepareCodexSessionsDir(codexHome, sharedHome, CodexHomeOptions{}, testLogger()); err != nil {
 		t.Fatalf("prepareCodexSessionsDir: %v", err)
 	}
 	sessions := filepath.Join(codexHome, "sessions")
@@ -404,7 +468,7 @@ func TestPrepareCodexSessionsDir_LocalDirectoryResumeAcrossTaskIDs(t *testing.T)
 	if err := os.MkdirAll(home1, 0o755); err != nil {
 		t.Fatalf("mkdir home1: %v", err)
 	}
-	if err := prepareCodexSessionsDir(home1, sharedHome, CodexHomeOptions{IsLocalDirectory: true, SessionStoreKey: key}, testLogger()); err != nil {
+	if err := prepareCodexSessionsDir(home1, sharedHome, CodexHomeOptions{SessionStoreKey: key}, testLogger()); err != nil {
 		t.Fatalf("round 1 prepare: %v", err)
 	}
 	// Codex writes the round-1 rollout through the link into the store.
@@ -415,7 +479,7 @@ func TestPrepareCodexSessionsDir_LocalDirectoryResumeAcrossTaskIDs(t *testing.T)
 	if err := os.MkdirAll(home2, 0o755); err != nil {
 		t.Fatalf("mkdir home2: %v", err)
 	}
-	if err := prepareCodexSessionsDir(home2, sharedHome, CodexHomeOptions{IsLocalDirectory: true, SessionStoreKey: key, ResumeSessionID: sessionID}, testLogger()); err != nil {
+	if err := prepareCodexSessionsDir(home2, sharedHome, CodexHomeOptions{SessionStoreKey: key, ResumeSessionID: sessionID}, testLogger()); err != nil {
 		t.Fatalf("round 2 prepare: %v", err)
 	}
 

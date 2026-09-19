@@ -152,6 +152,37 @@ func TestPrepareCursorMcpConfigWritesProjectConfigAndApprovals(t *testing.T) {
 	}
 }
 
+func TestPrepareCursorMcpConfigPersistentDataSurvivesTaskCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	envRoot := t.TempDir()
+	workDir := filepath.Join(envRoot, "workdir")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	task := TaskContextForEnv{TaskID: "task-1", AgentID: "agent-1", IssueID: "issue-1"}
+	store := ProviderSessionStorePath("", "cursor", task)
+	cursorDataDir, err := prepareCursorMcpConfig(store, workDir, json.RawMessage(`{"mcpServers":{}}`), "", &sidecarManifest{})
+	if err != nil {
+		t.Fatalf("prepareCursorMcpConfig: %v", err)
+	}
+	transcript := filepath.Join(cursorDataDir, "projects", "project", "agent-transcripts", "session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	if err := os.WriteFile(transcript, []byte("exact transcript"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	if err := os.RemoveAll(envRoot); err != nil {
+		t.Fatalf("remove task env: %v", err)
+	}
+	if got, err := os.ReadFile(transcript); err != nil || string(got) != "exact transcript" {
+		t.Fatalf("Cursor transcript after task cleanup = %q, %v", got, err)
+	}
+}
+
 func TestPrepareCursorMcpConfigManagedEmptySet(t *testing.T) {
 	t.Parallel()
 
