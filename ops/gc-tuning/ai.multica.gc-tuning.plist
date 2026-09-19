@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.multica.gc-tuning</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>launchctl setenv MULTICA_GC_INTERVAL 10m; launchctl setenv MULTICA_GC_TTL 168h; launchctl setenv MULTICA_GC_ARTIFACT_TTL 1h; launchctl setenv MULTICA_GC_COMPLETED_TASK_TTL 12h; launchctl setenv MULTICA_GC_MIN_FREE_PERCENT 15; launchctl setenv MULTICA_GC_CODEX_SESSION_TTL 24h</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>
