@@ -4181,7 +4181,11 @@ func TestCodexInterruptCompletesNearConfiguredDeadline(t *testing.T) {
 
 func cancelFakeCodexAfterMarker(t *testing.T, fakePath, marker string, opts ExecOptions) (Result, time.Duration) {
 	t.Helper()
-	backend, err := New("codex", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	backend, err := New("codex", Config{
+		ExecutablePath: fakePath,
+		Logger:         slog.Default(),
+		Env:            map[string]string{"CODEX_HOME": newFakeCodexHome(t)},
+	})
 	if err != nil {
 		t.Fatalf("new codex backend: %v", err)
 	}
@@ -4792,6 +4796,17 @@ func writeFakeCodexAppServer(t *testing.T, body string) string {
 	return fakePath
 }
 
+// Keep usage fallback scans out of the developer's real session history.
+// The sessions directory must exist or codexSessionRoot falls back to HOME.
+func newFakeCodexHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, "sessions"), 0o755); err != nil {
+		t.Fatalf("create fake Codex sessions: %v", err)
+	}
+	return home
+}
+
 func executeFakeCodex(t *testing.T, fakePath string, opts ExecOptions) Result {
 	t.Helper()
 	result, _ := executeFakeCodexCollectingMessages(t, fakePath, opts, 10*time.Second)
@@ -4809,6 +4824,12 @@ func executeFakeCodexCollectingMessages(t *testing.T, fakePath string, opts Exec
 func executeFakeCodexCollectingMessagesWithConfig(t *testing.T, fakePath string, cfg Config, opts ExecOptions, budget time.Duration) (Result, []Message) {
 	t.Helper()
 	cfg.ExecutablePath = fakePath
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string)
+	}
+	if cfg.Env["CODEX_HOME"] == "" {
+		cfg.Env["CODEX_HOME"] = newFakeCodexHome(t)
+	}
 	backend, err := New("codex", cfg)
 	if err != nil {
 		t.Fatalf("new codex backend: %v", err)
