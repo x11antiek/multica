@@ -11,6 +11,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -32,6 +33,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useAuthStore } from "@multica/core/auth";
+import { derivePRMergeStatus } from "@multica/core/github";
+import { useCurrentWorkspace } from "@multica/core/paths";
 import { issueStatusArchiveConflictCount, createIssueStatusListStore } from "@multica/core/issue-statuses";
 import { baselineFromQuery } from "@multica/core/issue-views/baseline";
 import { IssueSurfaceWithStore } from "../../issues/surface/issue-surface";
@@ -101,7 +104,9 @@ import { ColorPicker, COLOR_PICKER_PRESETS } from "../../common/color-picker";
 import { StatusIcon } from "../../issues/components/status-icon";
 import { useStatusLabel } from "../../issues/utils/status-label";
 import { useT } from "../../i18n";
+import { AppLink, useNavigation } from "../../navigation";
 import { SettingsTab } from "./settings-layout";
+import { settingsHref } from "./settings-navigation";
 
 /**
  * Workspace issue status catalog management (MUL-6243).
@@ -137,6 +142,7 @@ const EMPTY_DRAFT: StatusDraft = {
 export function IssueStatusesTab() {
   const { t } = useT("settings");
   const wsId = useWorkspaceId();
+  const navigation = useNavigation();
 
   const [showArchived, setShowArchived] = useState(false);
   const [createCategory, setCreateCategory] = useState<IssueStatusCategory | null>(null);
@@ -155,6 +161,12 @@ export function IssueStatusesTab() {
     return members.find((m) => m.user_id === currentUser.id)?.role ?? null;
   }, [members, currentUser]);
   const isAdmin = myRole === "owner" || myRole === "admin";
+  // The status a merge moves issues to is set on the GitHub page (MUL-7726);
+  // its row carries a badge linking there.
+  const mergeTarget = derivePRMergeStatus(useCurrentWorkspace());
+  const mergeSettingsHref = settingsHref(navigation.pathname, navigation.searchParams, "integrations", {
+    integration: "github",
+  });
 
   const groups = useMemo(
     () =>
@@ -214,6 +226,8 @@ export function IssueStatusesTab() {
                 category={group.category}
                 entries={group.entries}
                 canManage={isAdmin}
+                mergeTarget={mergeTarget}
+                mergeSettingsHref={mergeSettingsHref}
                 onCreate={() => setCreateCategory(group.category)}
                 onEdit={(entry) => entry.is_system ? setShowBuiltInNotice(true) : setEditing(entry)}
                 onArchive={(entry) => {
@@ -267,6 +281,8 @@ function CategorySection({
   category,
   entries,
   canManage,
+  mergeTarget,
+  mergeSettingsHref,
   onCreate,
   onEdit,
   onArchive,
@@ -275,6 +291,9 @@ function CategorySection({
   category: IssueStatusCategory;
   entries: IssueStatusEntry[];
   canManage: boolean;
+  /** Badge the built-in Done row: PR auto-complete writes that status. */
+  mergeTarget: string;
+  mergeSettingsHref: string;
   onCreate: () => void;
   onEdit: (status: IssueStatusEntry) => void;
   onArchive: (status: IssueStatusEntry) => void;
@@ -376,6 +395,7 @@ function CategorySection({
                 <StatusRow
                   key={entry.id}
                   entry={entry}
+                  mergeBadgeHref={entry.key === mergeTarget && !entry.archived_at ? mergeSettingsHref : null}
                   label={entry.is_system ? labelOf(entry.key) : entry.name}
                   description={entry.is_system
                     ? t(($) => $.issue_statuses.built_in_descriptions[entry.key as BuiltInIssueStatus])
@@ -404,6 +424,7 @@ function CategorySection({
 
 function StatusRow({
   entry,
+  mergeBadgeHref,
   label,
   description,
   canManage,
@@ -416,6 +437,8 @@ function StatusRow({
   onMoveDown,
 }: {
   entry: IssueStatusEntry;
+  /** Where the "set when PRs merge" badge links, or null for no badge. */
+  mergeBadgeHref: string | null;
   label: string;
   description: string;
   canManage: boolean;
@@ -466,6 +489,15 @@ function StatusRow({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-body font-medium">{label}</span>
+          {mergeBadgeHref && (
+            <AppLink
+              href={mergeBadgeHref}
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-info/10 px-1.5 py-0.5 text-micro font-medium text-info transition-colors hover:bg-info/15 focus-visible:outline-2 focus-visible:outline-ring"
+            >
+              <Zap className="size-3" aria-hidden="true" />
+              {t(($) => $.issue_statuses.pr_auto_complete_badge)}
+            </AppLink>
+          )}
           {archived && (
             <Tooltip>
               <TooltipTrigger

@@ -22,16 +22,14 @@ import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { memberListOptions, workspaceKeys } from "@multica/core/workspace/queries";
-import {
-  deriveGitHubSettings,
-  githubInstallationsOptions,
-} from "@multica/core/github";
+import { deriveGitHubSettings, githubInstallationsOptions } from "@multica/core/github";
 import { api } from "@multica/core/api";
 import type { Workspace } from "@multica/core/types";
 import { AppLink, useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 import { SettingsTab } from "./settings-layout";
 import { GitHubMark } from "./github-mark";
+import { PRMergeStatusRow } from "./pr-merge-status-row";
 
 type SettingsKey =
   | "github_enabled"
@@ -285,19 +283,19 @@ export function GitHubTab() {
               icon={<Link2 className="h-4 w-4" />}
               label={t(($) => $.github.feature_auto_link_label)}
               description={
-                <p className="text-caption text-muted-foreground">
-                  {t(($) => $.github.connection_description_prefix)}{" "}
-                  <code className="rounded-xs bg-muted px-1 py-0.5 text-micro">
-                    {t(($) => $.github.connection_identifier_example)}
-                  </code>{" "}
-                  {t(($) => $.github.connection_description_suffix)}{" "}
-                  <strong>{t(($) => $.github.connection_description_done)}</strong>.
+                <p className="text-body text-muted-foreground">
+                  {t(($) => $.github.feature_auto_link_description, { example: "MUL-123" })}
                 </p>
               }
               checked={flags.autoLinkPRs}
               disabled={!canManage || !flags.enabled || savingKey === "github_auto_link_prs_enabled"}
               onCheckedChange={(v) => persistSetting("github_auto_link_prs_enabled", v)}
             />
+
+            {/* Shared by every code host; the self-hosted Git page shows the
+                same value. Greyed out with the rest of the GitHub features when
+                the master switch is off. */}
+            <PRMergeStatusRow canManage={canManage} disabled={!flags.enabled} />
           </CardContent>
         </Card>
       </section>
