@@ -32,6 +32,7 @@ func (d *Daemon) gcLoop(ctx context.Context) {
 	}
 	d.logger.Info("gc: started",
 		"interval", d.cfg.GCInterval,
+		"artifacts_only", d.cfg.GCArtifactsOnly,
 		"ttl", d.cfg.GCTTL,
 		"completed_task_ttl", d.cfg.GCCompletedTaskTTL,
 		"orphan_ttl", d.cfg.GCOrphanTTL,
@@ -110,6 +111,40 @@ func (d *Daemon) runGC(ctx context.Context) {
 		d.gcWorkspace(ctx, wsDir, stats)
 	}
 
+	if !d.cfg.GCArtifactsOnly {
+		d.runRetentionGC(ctx, root, stats)
+	}
+
+	// Time/TTL-paced reclamation above cannot notice a disk that is filling
+	// faster than artifacts age out of their TTL. This last pass is the only one
+	// that reacts to free space directly: if the filesystem is under the
+	// configured pressure threshold, it drops regenerable artifacts from
+	// completed task dirs, oldest-first, until space recovers. Runs after the
+	// normal passes so it only ever escalates what they already reclaimed.
+	d.runArtifactPressureSweep(ctx, stats)
+
+	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootIndexEntriesReclaimed > 0 {
+		d.logger.Info("gc: cycle complete",
+			"cleaned", stats.cleaned,
+			"orphaned", stats.orphaned,
+			"skipped", stats.skipped,
+			"artifact_dirs", stats.artifactDirs,
+			"artifact_removed", stats.artifactRemoved,
+			"codex_session_stores_reclaimed", stats.storesReclaimed,
+			"hermes_memory_stores_reclaimed", stats.hermesMemoryStoresReclaimed,
+			"hermes_session_stores_reclaimed", stats.hermesSessionStoresReclaimed,
+			"repo_caches_reclaimed", stats.repoCachesReclaimed,
+			"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
+			"task_root_index_entries_reclaimed", stats.taskRootIndexEntriesReclaimed,
+			"bytes_reclaimed", stats.bytesReclaimed,
+			"by_pattern", stats.byPattern,
+		)
+	}
+}
+
+// runRetentionGC handles data whose removal can lose source or conversation
+// history. Cache-only mode never enters this path, even with nonzero TTLs.
+func (d *Daemon) runRetentionGC(ctx context.Context, root string, stats *gcStats) {
 	// Stable-root records are published before the physical env root so a
 	// re-dispatch cannot choose a different readable path. If preparation never
 	// reaches ClaimEnvRoot, no task directory exists for the normal GC walk to
@@ -174,32 +209,6 @@ func (d *Daemon) runGC(ctx context.Context) {
 			stats.bytesReclaimed += tempBytes
 		}
 	}
-
-	// Time/TTL-paced reclamation above cannot notice a disk that is filling
-	// faster than artifacts age out of their TTL. This last pass is the only one
-	// that reacts to free space directly: if the filesystem is under the
-	// configured pressure threshold, it drops regenerable artifacts from
-	// completed task dirs, oldest-first, until space recovers. Runs after the
-	// normal passes so it only ever escalates what they already reclaimed.
-	d.runArtifactPressureSweep(ctx, stats)
-
-	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootIndexEntriesReclaimed > 0 {
-		d.logger.Info("gc: cycle complete",
-			"cleaned", stats.cleaned,
-			"orphaned", stats.orphaned,
-			"skipped", stats.skipped,
-			"artifact_dirs", stats.artifactDirs,
-			"artifact_removed", stats.artifactRemoved,
-			"codex_session_stores_reclaimed", stats.storesReclaimed,
-			"hermes_memory_stores_reclaimed", stats.hermesMemoryStoresReclaimed,
-			"hermes_session_stores_reclaimed", stats.hermesSessionStoresReclaimed,
-			"repo_caches_reclaimed", stats.repoCachesReclaimed,
-			"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
-			"task_root_index_entries_reclaimed", stats.taskRootIndexEntriesReclaimed,
-			"bytes_reclaimed", stats.bytesReclaimed,
-			"by_pattern", stats.byPattern,
-		)
-	}
 }
 
 // gcWorkspace scans task directories inside a single workspace directory.
@@ -225,6 +234,15 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			continue
 		}
 		meta, metaErr := execenv.ReadGCMeta(taskDir)
+		if d.cfg.GCArtifactsOnly {
+			action := gcActionSkip
+			if metaErr == nil && !meta.CompletedAt.IsZero() &&
+				d.cfg.GCArtifactTTL > 0 && time.Since(meta.CompletedAt) > d.cfg.GCArtifactTTL {
+				action = d.applyLocalDirectoryGCOverride(meta, gcActionCleanArtifacts)
+			}
+			d.applyGCAction(taskDir, action, stats)
+			continue
+		}
 		if metaErr == nil && meta.Kind == execenv.GCKindIssue && strings.TrimSpace(meta.IssueID) != "" {
 			if workspaceID := strings.TrimSpace(meta.WorkspaceID); workspaceID != "" {
 				issueCandidatesByWorkspace[workspaceID] = append(

@@ -125,6 +125,7 @@ type Config struct {
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
 	MaxConcurrentTasks             int                   // max tasks running in parallel (default: 20)
+	GCArtifactsOnly                bool                  // reclaim build/cache artifacts only; preserve task roots, repo history and provider stores
 	GCEnabled                      bool                  // enable periodic workspace garbage collection (default: true)
 	GCInterval                     time.Duration         // how often the GC loop runs (default: 2h)
 	GCTTL                          time.Duration         // clean dirs whose issue is done/cancelled and updated_at < now()-TTL (default: 24h)
@@ -661,7 +662,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		autoReloadEnabled = false
 	}
 
-	return Config{
+	cfg := Config{
 		ServerBaseURL:                   serverBaseURL,
 		DaemonID:                        daemonID,
 		LegacyDaemonIDs:                 legacyDaemonIDs,
@@ -672,6 +673,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		WorkspacesRoot:                  workspacesRoot,
 		KeepEnvAfterTask:                keepEnv,
 		GCEnabled:                       gcEnabled,
+		GCArtifactsOnly:                 boolFromEnv("MULTICA_GC_ARTIFACTS_ONLY", false),
 		GCInterval:                      gcInterval,
 		GCTTL:                           gcTTL,
 		GCCompletedTaskTTL:              gcCompletedTaskTTL,
@@ -709,7 +711,11 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		QwenArgs:                        qwenArgs,
 		QwenpawArgs:                     qwenpawArgs,
 		ProfileCommandOverrides:         profileCommandOverrides,
-	}, nil
+	}
+	if err := applyGCPolicyFile(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 // officialCloudHost is the hostname of Multica's hosted cloud. It's the only

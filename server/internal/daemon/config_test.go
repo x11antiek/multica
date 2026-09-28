@@ -1831,3 +1831,19 @@ func TestApplyOpenclawOverride_CLITimeout(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadConfig_ArtifactsOnlyIsOptIn(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+	for _, value := range []string{"", "true", "false"} {
+		t.Setenv("MULTICA_GC_ARTIFACTS_ONLY", value)
+		cfg, err := LoadConfig(Overrides{ServerURL: "http://localhost:0", WorkspacesRoot: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GCArtifactsOnly != (value == "true") {
+			t.Fatalf("value=%q artifacts_only=%v", value, cfg.GCArtifactsOnly)
+		}
+	}
+}
