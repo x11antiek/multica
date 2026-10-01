@@ -919,3 +919,27 @@ func TestHealthHandlerReportsProfileIdentity(t *testing.T) {
 		}
 	})
 }
+
+func TestHealthHandlerReportsEffectiveGCPolicy(t *testing.T) {
+	t.Parallel()
+	d := newGCTestDaemon(t, http.NewServeMux())
+	d.cfg.GCArtifactsOnly = true
+	d.cfg.GCInterval = 10 * time.Minute
+	d.cfg.GCArtifactTTL = time.Hour
+	d.cfg.GCMinFreePercent = 15
+	rec := httptest.NewRecorder()
+	d.healthHandler(time.Now()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var response struct {
+		GCPolicy GCPolicyStatus `json:"gc_policy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	p := response.GCPolicy
+	if !p.Enabled || !p.ArtifactsOnly || p.Interval != "10m0s" || p.ArtifactTTL != "1h0m0s" || p.MinFreePercent != 15 {
+		t.Fatalf("effective policy missing: %+v", p)
+	}
+	if !strings.Contains(strings.Join(p.ManagedArtifactSubpaths, ","), catalogRel) {
+		t.Fatal("catalog support missing")
+	}
+}

@@ -12,5 +12,8 @@ const (
 // relative paths rather than basenames: a repository may legitimately contain
 // a directory with the same leaf name.
 func ManagedReclaimableArtifactSubpaths() []string {
-	return []string{filepath.Join(codexHomeDirName, codexSandboxBinDirName)}
+	return []string{
+		filepath.Join(codexHomeDirName, codexSandboxBinDirName),
+		filepath.Join(codexHomeDirName, "cache", "remote_plugin_catalog"),
+	}
 }

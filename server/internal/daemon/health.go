@@ -13,14 +13,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
 // HealthResponse is returned by the daemon's local health endpoint.
 type HealthResponse struct {
-	Status string `json:"status"`
-	PID    int    `json:"pid"`
+	GCPolicy GCPolicyStatus `json:"gc_policy"`
+	Status   string         `json:"status"`
+	PID      int            `json:"pid"`
 	// OS is the daemon's runtime.GOOS. The desktop app compares it against its
 	// own host OS to detect a daemon it cannot manage — e.g. a Windows desktop
 	// reaching a Linux daemon inside WSL2 over localhost forwarding. The
@@ -84,6 +86,16 @@ type HealthResponse struct {
 	// older consumers see no change. Diagnostic only: nothing keys off it.
 	ReloadPendingReason string            `json:"reload_pending_reason,omitempty"`
 	Workspaces          []healthWorkspace `json:"workspaces"`
+}
+
+// GCPolicyStatus reports effective startup values, not the caller's environment.
+type GCPolicyStatus struct {
+	Enabled                 bool     `json:"enabled"`
+	ArtifactsOnly           bool     `json:"artifacts_only"`
+	Interval                string   `json:"interval"`
+	ArtifactTTL             string   `json:"artifact_ttl"`
+	MinFreePercent          int      `json:"min_free_percent"`
+	ManagedArtifactSubpaths []string `json:"managed_artifact_subpaths"`
 }
 
 type healthWorkspace struct {
@@ -343,6 +355,12 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 		}
 
 		resp := HealthResponse{
+			GCPolicy: GCPolicyStatus{
+				Enabled: d.cfg.GCEnabled, ArtifactsOnly: d.cfg.GCArtifactsOnly,
+				Interval: d.cfg.GCInterval.String(), ArtifactTTL: d.cfg.GCArtifactTTL.String(),
+				MinFreePercent:          d.cfg.GCMinFreePercent,
+				ManagedArtifactSubpaths: execenv.ManagedReclaimableArtifactSubpaths(),
+			},
 			Status:                status,
 			PID:                   os.Getpid(),
 			OS:                    runtime.GOOS,

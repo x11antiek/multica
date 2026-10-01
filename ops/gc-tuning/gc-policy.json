@@ -1,0 +1,6 @@
+{
+  "artifacts_only": true,
+  "interval": "10m",
+  "artifact_ttl": "1h",
+  "min_free_percent": 15
+}
