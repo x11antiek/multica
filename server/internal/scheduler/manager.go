@@ -25,6 +25,10 @@ type Options struct {
 	// shortest job cadence; defaults to 30 * time.Second.
 	TickInterval time.Duration
 
+	// FinalizationTimeout bounds the detached database clock read and terminal
+	// lease update together. Defaults to five seconds.
+	FinalizationTimeout time.Duration
+
 	// Logger is used for structured logs. nil defaults to
 	// slog.Default().
 	Logger *slog.Logger
@@ -49,6 +53,9 @@ func NewManager(pool *pgxpool.Pool, opts Options) *Manager {
 	}
 	if opts.TickInterval <= 0 {
 		opts.TickInterval = 30 * time.Second
+	}
+	if opts.FinalizationTimeout <= 0 {
+		opts.FinalizationTimeout = 5 * time.Second
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -379,7 +386,13 @@ func (m *Manager) runClaimed(
 	<-hbDone
 
 	dur := duration.Milliseconds()
-	dbTime, dberr := dbNow(context.Background(), m.pool)
+	// Finalization must survive caller cancellation so shutdown can record
+	// the terminal audit, but clock reads and writes share a bounded budget.
+	// A detached background context without a deadline can pin this loop
+	// indefinitely on a pool acquisition or locked execution row.
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), m.opts.FinalizationTimeout)
+	defer finishCancel()
+	dbTime, dberr := dbNow(finishCtx, m.pool)
 	if dberr != nil {
 		// Falling back to local time keeps the audit row honest enough
 		// for a triage; the watermark indices use plan_time, not
@@ -394,7 +407,7 @@ func (m *Manager) runClaimed(
 			nextRetry = dbTime.Add(delay)
 		}
 		errCode := classifyError(handlerErr)
-		if err := finishFailure(context.Background(), m.pool, c.ID, c.LeaseToken,
+		if err := finishFailure(finishCtx, m.pool, c.ID, c.LeaseToken,
 			dbTime, dur, errCode, handlerErr.Error(), nextRetry); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
 				log.Warn("scheduler: terminal FAILED ignored, lease was stolen",
@@ -413,7 +426,7 @@ func (m *Manager) runClaimed(
 		return
 	}
 
-	if err := finishSuccess(context.Background(), m.pool, c.ID, c.LeaseToken,
+	if err := finishSuccess(finishCtx, m.pool, c.ID, c.LeaseToken,
 		dbTime, dur, res); err != nil {
 		if errors.Is(err, ErrLeaseLost) {
 			log.Warn("scheduler: terminal SUCCESS ignored, lease was stolen",

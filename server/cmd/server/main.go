@@ -815,36 +815,25 @@ func main() {
 	// missing because of an unusual partial-migration state — by
 	// logging them on the tick that fails and retrying on the next
 	// cycle, so a temporary outage does not crash the server.
-	schedulerMgr := scheduler.NewManager(pool, scheduler.Options{})
-	if err := schedulerMgr.Register(scheduler.TaskUsageHourlyJob(pool)); err != nil {
-		slog.Warn("scheduler: failed to register task_usage_hourly rollup job", "error", err)
+	// Latency-sensitive delivery runs independently of synchronous maintenance.
+	// All three loops reuse the same durable occurrence leases and fencing.
+	wakeupSvc := &service.IssueWakeupService{Tasks: taskSvc}
+	schedulerLoops, err := serverSchedulerLoops(pool, []scheduler.JobSpec{
+		scheduler.TaskUsageHourlyJob(pool),
+		scheduler.SearchIndexChangePruneJob(queries),
+		scheduler.IssueWakeupJob(wakeupSvc),
+		scheduler.ChildEventSweepJob(wakeupSvc),
+		// These jobs own per-trigger plan_times via PlansForScope and retain
+		// the manager's occurrence-level idempotency, lease theft and retry.
+		scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc),
+		// Inert while plugins_v1 is disabled.
+		scheduler.PluginHookScheduleDispatchJob(queries, h.PluginService),
+	})
+	if err != nil {
+		slog.Error("scheduler registration failed", "error", err)
+		os.Exit(1)
 	}
-	// MUL-3551: scheduled-Autopilot dispatch runs on the same DB-backed
-	// scheduler. The job owns its plan_times via PlansForScope (each
-	// trigger has its own cron expression, so the Cadence planner does
-	// not fit). Crash recovery, occurrence-level idempotency, lease
-	// theft, and retry are all reused from the manager + sys_cron_executions
-	// — there is no separate goroutine for scheduled Autopilot anymore.
-	if err := schedulerMgr.Register(scheduler.SearchIndexChangePruneJob(queries)); err != nil {
-		slog.Warn("scheduler: failed to register search index change prune job", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.IssueWakeupJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
-		slog.Error("scheduler: register issue wakeups", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.ChildEventSweepJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
-		slog.Error("scheduler: register child-done sweep", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
-		slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
-	}
-	// Manifest-declared Plugin schedules share the same durable lease and retry
-	// machinery. The job is inert while plugins_v1 is disabled.
-	if err := schedulerMgr.Register(scheduler.PluginHookScheduleDispatchJob(queries, h.PluginService)); err != nil {
-		slog.Warn("scheduler: failed to register plugin_hook_schedule_dispatch job", "error", err)
-	}
-	go func() {
-		_ = schedulerMgr.Run(sweepCtx)
-	}()
+	schedulersDone := runSchedulerLoops(sweepCtx, schedulerLoops)
 
 	if metricsServer != nil {
 		go func() {
@@ -919,7 +908,14 @@ func main() {
 		},
 		StopOutboundRelay: stopRelay,
 		CancelWorkers:     sweepCancel,
-		StopHeartbeats:    heartbeatScheduler.Stop,
+		JoinSchedulers: func() {
+			select {
+			case <-schedulersDone:
+			case <-time.After(12 * time.Second):
+				slog.Warn("scheduler loops did not exit within shutdown timeout; leases will expire")
+			}
+		},
+		StopHeartbeats: heartbeatScheduler.Stop,
 		JoinWebhookWorker: func() {
 			if h.WebhookDeliveryWorker != nil && !h.WebhookDeliveryWorker.WaitWithTimeout(5*time.Second) {
 				slog.Warn("webhook delivery worker did not exit within shutdown timeout")

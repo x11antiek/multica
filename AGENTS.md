@@ -34,6 +34,7 @@ Use `Makefile`, workspace `package.json` files, and `pnpm-workspace.yaml` for cu
 - Worktrees share PostgreSQL but have isolated databases/ports. Use the environment scripts and `.env.worktree`; do not copy the main checkout's `.env` or manually create a database through an assumed PostgreSQL instance.
 - Regenerate sqlc with `make sqlc` after SQL changes.
 - Run the narrowest useful checks while iterating, then broaden when risk warrants it. Report what actually ran and any skipped checks.
+- Keep wakeup dispatch and child-event sweep in separate scheduler loops from maintenance and from each other. Preserve stable lease job names, sequential execution within each loop, bounded detached lease finalization, and cancellation/join before closing the database pool.
 
 Run these from the repository root:
 
