@@ -41,6 +41,10 @@ type shutdownSequence struct {
 	// bound to, including the channel supervisor.
 	CancelWorkers func()
 
+	// JoinSchedulers lets cancelled handlers finalize their fenced leases
+	// while the database pool is still alive.
+	JoinSchedulers func()
+
 	// StopHeartbeats flushes the final batch of queued heartbeat bumps.
 	StopHeartbeats func()
 
@@ -68,6 +72,7 @@ func (s shutdownSequence) run() {
 		s.DrainHTTP,
 		s.StopOutboundRelay,
 		s.CancelWorkers,
+		s.JoinSchedulers,
 		s.StopHeartbeats,
 		s.JoinWebhookWorker,
 		s.JoinTelegram,
